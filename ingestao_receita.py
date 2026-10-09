@@ -13,10 +13,12 @@ Executa em streaming com DuckDB em memória (:memory:) sem gerar arquivos interm
 
 import csv
 import glob
+import io
 import logging
 import os
 import time
 import unicodedata
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -297,25 +299,34 @@ class ReceitaGraphIngestor:
             raise FileNotFoundError(f"Arquivo de CNAEs não encontrado em {self.dados_dir}")
 
         cnae_path = str(cnae_files[0])
-        con = duckdb.connect(":memory:")
-        logger.info("Lendo arquivo de CNAEs: %s", cnae_path)
-
-        rows = con.execute(f"""
-            SELECT column0 as raw, column1 as desc
-            FROM read_csv('{cnae_path}', delim=';', header=false, encoding='latin1')
-        """).fetchall()
+        logger.info("Lendo arquivo de CNAEs via Python CSV (latin-1): %s", cnae_path)
 
         cnae_dict: Dict[str, Dict[str, str]] = {}
-        for raw, desc in rows:
-            raw_str = str(raw).strip()
-            fmt = formatar_cnae(raw_str)
-            sec = obter_secao_cnae(raw_str)
-            cnae_dict[raw_str] = {
-                "codigo": fmt,
-                "codigo_raw": raw_str,
-                "descricao": str(desc).strip(),
-                "secao": sec,
-            }
+
+        def _processar_linhas(iter_linhas: Any) -> None:
+            reader = csv.reader(iter_linhas, delimiter=";")
+            for row in reader:
+                if len(row) >= 2:
+                    raw_str = row[0].strip()
+                    desc = row[1].strip()
+                    fmt = formatar_cnae(raw_str)
+                    sec = obter_secao_cnae(raw_str)
+                    cnae_dict[raw_str] = {
+                        "codigo": fmt,
+                        "codigo_raw": raw_str,
+                        "descricao": desc,
+                        "secao": sec,
+                    }
+
+        if cnae_path.endswith(".zip"):
+            with zipfile.ZipFile(cnae_path, "r") as zf:
+                alvos = [n for n in zf.namelist() if "CNAE" in n.upper()] or zf.namelist()
+                with zf.open(alvos[0], "r") as f_inner:
+                    texto = io.TextIOWrapper(f_inner, encoding="latin-1", errors="replace")
+                    _processar_linhas(texto)
+        else:
+            with open(cnae_path, mode="r", encoding="latin-1", errors="replace") as f:
+                _processar_linhas(f)
 
         batch_cnaes = list(cnae_dict.values())
         q_cnaes = """
@@ -375,7 +386,7 @@ class ReceitaGraphIngestor:
                 '{padrao_estab}',
                 delim=';',
                 header=false,
-                encoding='latin1',
+                encoding='latin-1',
                 types=['VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR'],
                 ignore_errors=true
             )

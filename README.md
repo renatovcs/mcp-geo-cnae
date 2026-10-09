@@ -11,7 +11,7 @@ O grafo conecta atividades econômicas, dinâmicas temporais de mercado e topolo
 - **Nós**:
   - `(:Regiao {nome})`: 5 Macrorregiões oficiais do Brasil (Norte, Nordeste, Centro-Oeste, Sudeste, Sul).
   - `(:Estado {uf, nome})`: Unidades Federativas do Brasil (27 estados indexados).
-  - `(:Municipio {codigo_ibge, nome, lat, lon})`: Municípios com coordenadas geodésicas.
+  - `(:Municipio {codigo_ibge, nome, lat, lon})`: Todos os 5.570 municípios do Brasil com coordenadas geodésicas.
   - `(:CNAE {codigo, codigo_raw, descricao, secao})`: 1.359 subclasses econômicas oficiais da Receita Federal classificadas nas seções A até U.
 - **Arestas**:
   - `(:Municipio)-[:PERTENCE_A]->(:Estado)-[:PERTENCE_A]->(:Regiao)`: Hierarquia territorial multinível.
@@ -20,6 +20,31 @@ O grafo conecta atividades econômicas, dinâmicas temporais de mercado e topolo
   - `(:CNAE)-[:COOCORRE_EM {frequencia, codigo_ibge_municipio}]-(:CNAE)`: Coocorrência cruzada restrita ao município.
   - `(:CNAE)-[:GERA_FILIAL {frequencia}]->(:CNAE)`: Relação agregada entre a atividade principal da Matriz e as atividades abertas como Filiais (padrões corporativos de desdobramento e verticalização).
   - `(:CNAE)-[:PRESENTE_EM {estoque_ativas, abertas_ultimos_5_anos, encerradas_ultimos_5_anos, taxa_sobrevivencia_5_anos, saldo_recente}]->(:Municipio)`: Densidade territorial e indicadores de dinamismo e sobrevivência setorial.
+
+---
+
+## 📁 Processamento Direto dos Dados Brutos da Receita Federal
+
+O pipeline foi projetado para **não depender de arquivos intermediários em disco (.duckdb ou .parquet)**. O processamento é realizado por **streaming paralelo em memória RAM** (`:memory:`) via DuckDB sobre a pasta original dos Dados Abertos da Receita Federal.
+
+### Estrutura dos Arquivos em `~/dados_receita` (Servidor OCI):
+
+```
+dados_receita/
+├── K3241.K03200Y0.D60912.ESTABELE ... Y9.D60912.ESTABELE (10 arquivos de Estabelecimentos)
+├── K3241.K03200Y0.D60912.EMPRECSV ... Y9.D60912.EMPRECSV (10 arquivos de Empresas)
+├── F.K03200$Z.D60912.CNAECSV                             (Catálogo de CNAEs)
+├── F.K03200$Z.D60912.NATJUCSV                            (Naturezas Jurídicas)
+├── F.K03200$Z.D60912.MOTICSV                             (Motivos de Situação)
+└── F.K03200$W.SIMPLES.CSV.D60912                         (Opção pelo Simples)
+```
+
+### Mapeamento Preciso SIAFI/TOM -> IBGE:
+Na tabela de estabelecimentos da Receita (`ESTABELE`), a coluna 21 armazena o código municipal da Receita Federal (SIAFI / TOM). O arquivo `municipios.csv` contém a correspondência exata de todos os **5.570 municípios brasileiros**:
+
+$$\text{ESTABELE.municipio (TOM)} \xrightarrow{\text{LPAD 4 dígitos}} \text{municipios.csv.siafi_id} \longrightarrow \text{codigo\_ibge, lat, lon, UF}$$
+
+Isso elimina qualquer ambiguidade de homônimos ou divergências de acentuação entre municípios brasileiros.
 
 ---
 
@@ -52,31 +77,43 @@ O grafo conecta atividades econômicas, dinâmicas temporais de mercado e topolo
 
 ## 🚀 Como Executar no Servidor OCI (Produção)
 
-No servidor OCI (`ubuntu@141.148.38.30`), com a pasta `~/dados_receita` contendo os arquivos brutos da Receita Federal:
+No servidor de produção na Oracle Cloud Infrastructure (`ubuntu@141.148.38.30`):
 
-### 1. Iniciar o Memgraph e o Memgraph Lab
+### 1. Conectar via SSH e acessar o projeto
+
+```bash
+ssh ubuntu@141.148.38.30
+cd ~/mcp-geo-cnae
+```
+
+### 2. Iniciar o Memgraph MAGE e Memgraph Lab
 
 ```bash
 docker compose up -d memgraph memgraph-lab
 ```
 
-- **Bolt**: `bolt://localhost:7687`
-- **Memgraph Lab**: [http://localhost:3000](http://localhost:3000)
+* **Memgraph Bolt**: `bolt://localhost:7687`
+* **Memgraph Lab (Interface Visual Web)**: [http://141.148.38.30:3000](http://141.148.38.30:3000)
 
-### 2. Executar o Container de Ingestão Nacional (Brasil Inteiro)
+### 3. Executar o Container de Ingestão Nacional (Brasil Inteiro)
 
-O container `geo-cnae-ingestor` lê diretamente a pasta `/home/ubuntu/dados_receita` montada em `/dados_receita:ro`, processa os 5.570 municípios e todos os arquivos brutos (`*.ESTABELE`, `*.CNAECSV`) em streaming na RAM (sem gerar arquivos `.duckdb` em disco) e carrega o grafo completo no Memgraph:
+O container `geo-cnae-ingestor` lê diretamente a pasta `/home/ubuntu/dados_receita` montada em `/dados_receita:ro`. O script lê em streaming os arquivos `*.ESTABELE` e `*.CNAECSV`, calcula as métricas em RAM e popula o Memgraph:
 
 ```bash
 docker compose run --rm geo-cnae-ingestor
 ```
 
-*(Opcional: se a pasta estiver em outro caminho, passe a variável de ambiente: `DADOS_RECEITA_DIR=/caminho/dados docker compose run --rm geo-cnae-ingestor`)*.
+> **Dica**: Acompanhe o log detalhado no terminal. A operação é executada com batches otimizados `UNWIND` e encerra o container automaticamente ao concluir.
 
-### 3. Iniciar o Servidor MCP em Container
+### 4. Iniciar o Servidor MCP
 
 ```bash
 docker compose up -d geo-cnae-server
+```
+
+Para inspecionar logs do servidor:
+```bash
+docker compose logs -f geo-cnae-server
 ```
 
 ---
@@ -89,7 +126,7 @@ docker compose up -d geo-cnae-server
 docker compose up -d memgraph memgraph-lab
 ```
 
-### 2. Instalar Dependências e Executar Testes
+### 2. Instalar Dependências e Executar Testes Automatizados
 
 ```bash
 python3 -m venv .venv
@@ -98,13 +135,13 @@ pip install -r requirements.txt
 python -m unittest tests/test_mcp_geo_cnae.py
 ```
 
-### 3. Ingestão Sintética Rápida (Mock)
+### 3. Ingestão Sintética Rápida (Mock de Validação)
 
 ```bash
 python ingestao.py
 ```
 
-### 4. Iniciar Servidor MCP Local
+### 4. Iniciar Servidor MCP Local via Terminal
 
 ```bash
 python server.py
@@ -114,6 +151,7 @@ python server.py
 
 ## 🔌 Configuração no Cliente MCP (Claude Desktop / Cursor / Antigravity)
 
+### Conexão Local:
 ```json
 {
   "mcpServers": {
@@ -128,4 +166,50 @@ python server.py
     }
   }
 }
+```
+
+### Conexão com Servidor OCI Remoto:
+```json
+{
+  "mcpServers": {
+    "geo-cnae-oci": {
+      "command": "ssh",
+      "args": [
+        "ubuntu@141.148.38.30",
+        "docker exec -i mcp-geo-cnae-server python server.py"
+      ]
+    }
+  }
+}
+```
+
+---
+
+## 🔍 Exemplos de Consultas Cypher no Memgraph Lab
+
+Acesse `http://141.148.38.30:3000` (ou `http://localhost:3000`) para rodar consultas exploratórias:
+
+### 1. Dinâmica de sobrevivência setorial por município:
+```cypher
+MATCH (c:CNAE {codigo: "6201-5/01"})-[r:PRESENTE_EM]->(m:Municipio {nome: "Curitiba"})
+MATCH (m)-[:PERTENCE_A]->(e:Estado)-[:PERTENCE_A]->(reg:Regiao)
+RETURN m.nome AS municipio, e.uf AS uf, reg.nome AS regiao,
+       r.estoque_ativas AS ativas,
+       r.abertas_ultimos_5_anos AS abertas_5a,
+       r.taxa_sobrevivencia_5_anos AS taxa_sobrevivencia;
+```
+
+### 2. Ramos mais comuns de expansão corporativa Matriz -> Filiais:
+```cypher
+MATCH (matriz:CNAE {codigo: "6201-5/01"})-[r:GERA_FILIAL]->(filial:CNAE)
+RETURN filial.codigo AS filial_cnae, filial.descricao AS ramo_filial, r.frequencia AS ocorrencias
+ORDER BY r.frequencia DESC
+LIMIT 10;
+```
+
+### 3. Navegação territorial e municípios vizinhos:
+```cypher
+MATCH (m:Municipio {nome: "São Paulo"})-[r:FAZ_DIVISA_COM]-(viz:Municipio)
+RETURN m.nome AS origem, viz.nome AS vizinho, r.distancia_km AS distancia_km
+ORDER BY r.distancia_km ASC;
 ```
