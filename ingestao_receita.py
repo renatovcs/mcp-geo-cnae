@@ -416,7 +416,7 @@ class ReceitaGraphIngestor:
                 '{padrao_estab}',
                 delim=';',
                 header=false,
-                encoding='latin-1',
+                encoding='CP1252',
                 all_varchar=true,
                 ignore_errors=true
             )
