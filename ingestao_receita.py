@@ -213,15 +213,15 @@ class ReceitaGraphIngestor:
                 cast(m.longitude as double) as lon,
                 e.uf,
                 lpad(trim(cast(m.siafi_id as varchar)), 4, '0') as siafi_tom,
-                coalesce(r.codigo_regiao_imediata, '') as cod_imed,
-                coalesce(r.nome_regiao_imediata, '') as nome_imed,
-                coalesce(r.codigo_regiao_intermediaria, '') as cod_inter,
-                coalesce(r.nome_regiao_intermediaria, '') as nome_inter,
-                coalesce(r.nome_microrregiao, '') as nome_micro,
-                coalesce(r.nome_mesorregiao, '') as nome_meso
-            FROM 'municipios.csv' m
-            JOIN 'estados.csv' e ON m.codigo_uf = e.codigo_uf
-            LEFT JOIN 'regioes_ibge.csv' r ON cast(m.codigo_ibge as varchar) = cast(r.codigo_ibge as varchar)
+                coalesce(cast(r.codigo_regiao_imediata as varchar), '') as cod_imed,
+                coalesce(cast(r.nome_regiao_imediata as varchar), '') as nome_imed,
+                coalesce(cast(r.codigo_regiao_intermediaria as varchar), '') as cod_inter,
+                coalesce(cast(r.nome_regiao_intermediaria as varchar), '') as nome_inter,
+                coalesce(cast(r.nome_microrregiao as varchar), '') as nome_micro,
+                coalesce(cast(r.nome_mesorregiao as varchar), '') as nome_meso
+            FROM read_csv('municipios.csv') m
+            JOIN read_csv('estados.csv') e ON m.codigo_uf = e.codigo_uf
+            LEFT JOIN read_csv('regioes_ibge.csv', all_varchar=true) r ON cast(m.codigo_ibge as varchar) = r.codigo_ibge
         """).fetchall()
 
         batch_muns: List[Dict[str, Any]] = []
