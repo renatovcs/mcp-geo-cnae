@@ -402,11 +402,11 @@ class ReceitaGraphIngestor:
         con.execute(f"""
             CREATE VIEW view_estabelecimentos AS
             SELECT 
-                column0  AS cnpj_basico,
-                column1  AS cnpj_ordem,
-                column3  AS matriz_filial,
-                column5  AS situacao_cadastral,
-                column6  AS data_situacao_cadastral,
+                column00 AS cnpj_basico,
+                column01 AS cnpj_ordem,
+                column03 AS matriz_filial,
+                column05 AS situacao_cadastral,
+                column06 AS data_situacao_cadastral,
                 column10 AS data_inicio_atividade,
                 column11 AS cnae_principal,
                 column12 AS cnae_secundaria,
@@ -417,7 +417,7 @@ class ReceitaGraphIngestor:
                 delim=';',
                 header=false,
                 encoding='latin-1',
-                types=['VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR'],
+                all_varchar=true,
                 ignore_errors=true
             )
             WHERE length(column11) = 7;
