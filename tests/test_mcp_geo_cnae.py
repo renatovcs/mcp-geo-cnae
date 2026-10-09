@@ -8,6 +8,7 @@ from server import (
     buscar_expansao_filiais_cnae,
     buscar_malha_municipal_vizinha,
     buscar_perfil_economico_municipio,
+    buscar_perfil_economico_regiao_ibge,
     buscar_visao_macro_regiao,
 )
 
@@ -52,6 +53,8 @@ class TestMCPGeoCNAEReal(unittest.TestCase):
         self.assertEqual(resultado["nome"], "Curitiba")
         self.assertEqual(resultado["estado"]["uf"], "PR")
         self.assertEqual(resultado["estado"]["regiao"], "Sul")
+        self.assertEqual(resultado["regiao_imediata_ibge"], "Curitiba")
+        self.assertEqual(resultado["regiao_intermediaria_ibge"], "Curitiba")
 
         vizinhos = resultado["municipios_vizinhos"]
         self.assertGreater(len(vizinhos), 0)
@@ -113,6 +116,15 @@ class TestMCPGeoCNAEReal(unittest.TestCase):
         self.assertIn("PR", ufs)
         self.assertIn("SC", ufs)
         self.assertIn("RS", ufs)
+
+    def test_buscar_perfil_economico_regiao_ibge(self) -> None:
+        resultado: Dict[str, Any] = buscar_perfil_economico_regiao_ibge("Curitiba", top_cnaes=5)
+        self.assertTrue(resultado["encontrado"])
+        self.assertEqual(resultado["regiao_nome"], "Curitiba")
+        self.assertIn(resultado["tipo_regiao_ibge"], ["Região Imediata", "Região Intermediária"])
+        self.assertEqual(resultado["uf"], "PR")
+        self.assertGreater(resultado["total_municipios_integrantes"], 0)
+        self.assertIsInstance(resultado["principais_cnaes_polo_regional"], list)
 
     def test_municipio_inexistente(self) -> None:
         ibge_fantasma = "9999999"

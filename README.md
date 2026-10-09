@@ -11,10 +11,12 @@ O grafo conecta atividades econômicas, dinâmicas temporais de mercado e topolo
 - **Nós**:
   - `(:Regiao {nome})`: 5 Macrorregiões oficiais do Brasil (Norte, Nordeste, Centro-Oeste, Sudeste, Sul).
   - `(:Estado {uf, nome})`: Unidades Federativas do Brasil (27 estados indexados).
-  - `(:Municipio {codigo_ibge, nome, lat, lon})`: Todos os 5.570 municípios do Brasil com coordenadas geodésicas.
+  - `(:RegiaoIntermediaria {codigo, nome})`: 133 Regiões Geográficas Intermediárias do IBGE (articulação de polos e fluxos econômicos estaduais).
+  - `(:RegiaoImediata {codigo, nome})`: 510 Regiões Geográficas Imediatas do IBGE (rede urbana estruturada em torno de centros urbanos locais).
+  - `(:Municipio {codigo_ibge, nome, lat, lon, regiao_imediata, regiao_intermediaria, microrregiao, mesorregiao})`: Todos os 5.570 municípios do Brasil com coordenadas geodésicas e metadados regionais completos do IBGE.
   - `(:CNAE {codigo, codigo_raw, descricao, secao})`: 1.359 subclasses econômicas oficiais da Receita Federal classificadas nas seções A até U.
 - **Arestas**:
-  - `(:Municipio)-[:PERTENCE_A]->(:Estado)-[:PERTENCE_A]->(:Regiao)`: Hierarquia territorial multinível.
+  - `(:Municipio)-[:PERTENCE_A]->(:RegiaoImediata)-[:PERTENCE_A]->(:RegiaoIntermediaria)-[:PERTENCE_A]->(:Estado)-[:PERTENCE_A]->(:Regiao)`: Hierarquia territorial e regional multinível do IBGE.
   - `(:Municipio)-[:FAZ_DIVISA_COM {distancia_km}]-(:Municipio)`: Relação de fronteira física real com cálculo geodésico de distância via `geopy.distance.geodesic`.
   - `(:CNAE)-[:COOCORRE_GERAL {frequencia}]-(:CNAE)`: Coocorrências entre atividade principal e secundárias de empresas ativas em escala nacional.
   - `(:CNAE)-[:COOCORRE_EM {frequencia, codigo_ibge_municipio}]-(:CNAE)`: Coocorrência cruzada restrita ao município.
@@ -57,7 +59,7 @@ Isso elimina qualquer ambiguidade de homônimos ou divergências de acentuação
 | **Cálculo da Taxa de Mortalidade** | **Safra de 5 anos (Metodologia Sebrae/IBGE)** | Comparar empresas encerradas de 30 anos atrás com ativas hoje gera viés de sobrevivência severo. Adotou-se a taxa de sobrevivência em ciclo crítico de 5 anos ($1 - \frac{\text{baixadas 5a}}{\text{abertas 5a}}$) e saldo anual recente. |
 | **Matriz -> Filiais** | **Aresta Agregada `[:GERA_FILIAL]`** | Mapeia os padrões de expansão setorial em nível macroeconômico sem inflar a memória do banco com 50M de nós individuais de CNPJs. |
 | **Empresas Baixadas** | **Apenas CNAE Principal** | Reduz sobrecarga e ruído de secundárias em entidades extintas, focando na atividade core que pautou o encerramento. |
-| **Hierarquia Geográfica** | **Aprovado (`Regiao` e `Estado`)** | 32 nós apenas, habilitando agregação e filtros macroeconômicos diretos para LLMs. |
+| **Hierarquia Geográfica** | **Aprovado (`RegiaoImediata`, `RegiaoIntermediaria`, `Estado`, `Regiao`)** | Modela formalmente as divisões intraestaduais do IBGE (510 Regiões Imediatas e 133 Intermediárias) além de estados e macrorregiões, permitindo análises por polos econômicos regionais sem ruído. |
 
 ---
 
@@ -67,8 +69,9 @@ Isso elimina qualquer ambiguidade de homônimos ou divergências de acentuação
 |---|---|---|
 | `buscar_coocorrencia_cnaes_global` | `codigo_cnae: str`, `limite: int = 20` | Retorna os CNAEs que mais coocorrem no Brasil com a atividade em empresas ativas (aceita `'6201-5/01'` ou `'6201501'`). |
 | `buscar_coocorrencia_cnaes_municipio` | `codigo_cnae: str`, `codigo_ibge: str`, `limite: int = 20` | Retorna as coocorrências econômicas restritas ao município informado (por código IBGE ou nome). |
-| `buscar_malha_municipal_vizinha` | `codigo_ibge: str` | Retorna a topologia de fronteiras de um município, distâncias geodésicas dos municípios limítrofes, seu Estado e Região. |
-| `buscar_perfil_economico_municipio` | `codigo_ibge: str`, `top_cnaes: int = 10` | Retorna o ranking das atividades com maior concentração de empresas ativas, região geográfica e indicadores de dinâmica/sobrevivência. |
+| `buscar_malha_municipal_vizinha` | `codigo_ibge: str` | Retorna a topologia de fronteiras de um município, distâncias geodésicas dos municípios limítrofes, Região Imediata, Região Intermediária, Estado e Macrorregião. |
+| `buscar_perfil_economico_municipio` | `codigo_ibge: str`, `top_cnaes: int = 10` | Retorna o ranking das atividades com maior concentração de empresas ativas, Região Imediata e Intermediária do IBGE e indicadores de dinâmica/sobrevivência. |
+| `buscar_perfil_economico_regiao_ibge` | `nome_regiao: str`, `top_cnaes: int = 10` | Agrega e sumariza os principais setores econômicos e empresas ativas de toda uma Região Geográfica Imediata ou Intermediária do IBGE (ex: `'Curitiba'`, `'Campinas'`, `'Ponta Grossa'`). |
 | `buscar_dinamica_sobrevivencia_cnae` | `codigo_cnae: str`, `codigo_ibge: str` | Retorna a análise setorial aprofundada: estoque ativo, abertas e baixadas em 5 anos, taxa de sobrevivência (Sebrae/IBGE), saldo recente e diagnóstico de viabilidade. |
 | `buscar_expansao_filiais_cnae` | `codigo_cnae: str`, `limite: int = 10` | Retorna as atividades econômicas mais frequentes abertas como filiais a partir da matriz daquele CNAE (`[:GERA_FILIAL]`). |
 | `buscar_visao_macro_regiao` | `nome_regiao: str` | Retorna a composição de estados e municípios mapeados de uma das 5 macrorregiões do Brasil (ex: `'Sul'`, `'Sudeste'`). |
@@ -213,3 +216,14 @@ MATCH (m:Municipio {nome: "São Paulo"})-[r:FAZ_DIVISA_COM]-(viz:Municipio)
 RETURN m.nome AS origem, viz.nome AS vizinho, r.distancia_km AS distancia_km
 ORDER BY r.distancia_km ASC;
 ```
+
+### 4. Traversal da hierarquia intraestadual do IBGE (Regiões Imediatas e Intermediárias):
+```cypher
+MATCH (m:Municipio {nome: "Castro"})-[:PERTENCE_A]->(ri:RegiaoImediata)-[:PERTENCE_A]->(rint:RegiaoIntermediaria)-[:PERTENCE_A]->(e:Estado)-[:PERTENCE_A]->(reg:Regiao)
+RETURN m.nome AS municipio,
+       ri.nome AS regiao_imediata,
+       rint.nome AS regiao_intermediaria,
+       e.uf AS estado,
+       reg.nome AS macrorregiao;
+```
+

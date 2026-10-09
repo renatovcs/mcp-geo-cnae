@@ -212,23 +212,26 @@ def buscar_coocorrencia_cnaes_municipio(
 def buscar_malha_municipal_vizinha(codigo_ibge: str) -> Dict[str, Any]:
     """
     Consulta a topologia geográfica de um município brasileiro pelo seu código IBGE (ou nome),
-    retornando os dados do município, seu Estado, Região do Brasil e todos os municípios limítrofes
-    que fazem divisa territorial física com ele, incluindo a distância geodésica em km.
+    retornando os dados do município, Região Imediata e Intermediária (IBGE), Estado, Macrorregião
+    e todos os municípios limítrofes que fazem divisa territorial física com ele.
 
     Args:
         codigo_ibge: Código IBGE de 7 dígitos do município (ex: '3550308') ou nome do município.
 
     Returns:
-        Dicionário estruturado com dados do município de origem, estado, região e lista de vizinhos.
+        Dicionário estruturado com dados do município, hierarquia regional completa do IBGE e lista de vizinhos.
     """
     ibge_str = codigo_ibge.strip()
     query = """
     MATCH (m:Municipio)
     WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
-    MATCH (m)-[:PERTENCE_A]->(e:Estado)
+    OPTIONAL MATCH (m)-[:PERTENCE_A]->(ri:RegiaoImediata)
+    OPTIONAL MATCH (ri)-[:PERTENCE_A]->(rint:RegiaoIntermediaria)
+    OPTIONAL MATCH (rint)-[:PERTENCE_A]->(e:Estado)
     OPTIONAL MATCH (e)-[:PERTENCE_A]->(reg:Regiao)
-    OPTIONAL MATCH (m)-[r:FAZ_DIVISA_COM]-(v:Municipio)-[:PERTENCE_A]->(ve:Estado)
-    WITH m, e, reg, collect(DISTINCT CASE WHEN v IS NOT NULL THEN {
+    OPTIONAL MATCH (m)-[r:FAZ_DIVISA_COM]-(v:Municipio)
+    OPTIONAL MATCH (v)-[:PERTENCE_A*1..3]->(ve:Estado)
+    WITH m, e, reg, ri, rint, collect(DISTINCT CASE WHEN v IS NOT NULL THEN {
         codigo_ibge: v.codigo_ibge,
         nome: v.nome,
         uf: ve.uf,
@@ -238,6 +241,10 @@ def buscar_malha_municipal_vizinha(codigo_ibge: str) -> Dict[str, Any]:
            m.nome AS nome,
            m.lat AS lat,
            m.lon AS lon,
+           coalesce(m.regiao_imediata, ri.nome, '') AS regiao_imediata,
+           coalesce(m.regiao_intermediaria, rint.nome, '') AS regiao_intermediaria,
+           coalesce(m.microrregiao, '') AS microrregiao,
+           coalesce(m.mesorregiao, '') AS mesorregiao,
            e.uf AS estado_uf,
            e.nome AS estado_nome,
            reg.nome AS regiao_nome,
@@ -259,7 +266,7 @@ def buscar_malha_municipal_vizinha(codigo_ibge: str) -> Dict[str, Any]:
                 {
                     "codigo_ibge": str(item["codigo_ibge"]),
                     "nome": str(item["nome"]),
-                    "uf": str(item["uf"]),
+                    "uf": str(item["uf"] or ""),
                     "distancia_km": float(item["distancia_km"]),
                 }
                 for item in result["vizinhos"]
@@ -274,9 +281,14 @@ def buscar_malha_municipal_vizinha(codigo_ibge: str) -> Dict[str, Any]:
                 "nome": str(result["nome"]),
                 "lat": float(result["lat"]),
                 "lon": float(result["lon"]),
+                "regiao_imediata_ibge": str(result["regiao_imediata"]),
+                "regiao_intermediaria_ibge": str(result["regiao_intermediaria"]),
+                "microrregiao": str(result["microrregiao"]),
+                "mesorregiao": str(result["mesorregiao"]),
                 "estado": {
-                    "uf": str(result["estado_uf"]),
-                    "nome": str(result["estado_nome"]),
+                    "uf": str(result["estado_uf"] or ""),
+                    "nome": str(result["estado_nome"] or ""),
+                    "macrorregiao": str(result["regiao_nome"] or ""),
                     "regiao": str(result["regiao_nome"] or ""),
                 },
                 "total_vizinhos": len(vizinhos_lista),
@@ -293,25 +305,27 @@ def buscar_perfil_economico_municipio(
 ) -> Dict[str, Any]:
     """
     Retorna o perfil econômico consolidado de um município, listando as atividades (CNAEs)
-    com maior concentração de empresas ativas, região geográfica e indicadores de dinâmica/sobrevivência.
+    com maior concentração de empresas ativas, Região Imediata/Intermediária do IBGE e indicadores de dinâmica/sobrevivência.
 
     Args:
         codigo_ibge: Código IBGE (ex: '3550308') ou nome do município (ex: 'São Paulo', 'Curitiba').
         top_cnaes: Quantidade de principais atividades econômicas a retornar (padrão: 10).
 
     Returns:
-        Dicionário com dados do município, Estado, Região, total de empresas ativas e ranking de CNAEs enriquecido.
+        Dicionário com dados do município, Região Imediata, Intermediária, Estado, total de empresas e ranking enriquecido.
     """
     ibge_str = codigo_ibge.strip()
     query = """
     MATCH (m:Municipio)
     WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
-    MATCH (m)-[:PERTENCE_A]->(e:Estado)
+    OPTIONAL MATCH (m)-[:PERTENCE_A]->(ri:RegiaoImediata)
+    OPTIONAL MATCH (ri)-[:PERTENCE_A]->(rint:RegiaoIntermediaria)
+    OPTIONAL MATCH (rint)-[:PERTENCE_A]->(e:Estado)
     OPTIONAL MATCH (e)-[:PERTENCE_A]->(reg:Regiao)
     OPTIONAL MATCH (c:CNAE)-[r:PRESENTE_EM]->(m)
-    WITH m, e, reg, c, r
+    WITH m, e, reg, ri, rint, c, r
     ORDER BY coalesce(r.estoque_ativas, r.quantidade_empresas_ativas, 0) DESC
-    WITH m, e, reg,
+    WITH m, e, reg, ri, rint,
          sum(coalesce(r.estoque_ativas, r.quantidade_empresas_ativas, 0)) AS total_empresas_ativas,
          collect({
              codigo: c.codigo,
@@ -325,6 +339,8 @@ def buscar_perfil_economico_municipio(
          })[0..$top_cnaes] AS top_atividades
     RETURN m.codigo_ibge AS codigo_ibge,
            m.nome AS nome,
+           coalesce(m.regiao_imediata, ri.nome, '') AS regiao_imediata,
+           coalesce(m.regiao_intermediaria, rint.nome, '') AS regiao_intermediaria,
            e.uf AS uf,
            e.nome AS estado_nome,
            reg.nome AS regiao_nome,
@@ -361,14 +377,96 @@ def buscar_perfil_economico_municipio(
                 "encontrado": True,
                 "codigo_ibge": str(result["codigo_ibge"]),
                 "nome": str(result["nome"]),
-                "uf": str(result["uf"]),
-                "estado": str(result["estado_nome"]),
+                "regiao_imediata_ibge": str(result["regiao_imediata"]),
+                "regiao_intermediaria_ibge": str(result["regiao_intermediaria"]),
+                "uf": str(result["uf"] or ""),
+                "estado": str(result["estado_nome"] or ""),
                 "regiao": str(result["regiao_nome"] or ""),
+                "macrorregiao": str(result["regiao_nome"] or ""),
                 "total_empresas_ativas_mapeadas": int(result["total_empresas_ativas"] or 0),
                 "principais_cnaes": atividades,
             }
     except Neo4jError as exc:
         logger.error("Erro Cypher em buscar_perfil_economico_municipio: %s", exc.message)
+        raise RuntimeError(f"Falha na consulta ao banco de grafos: {exc.message}") from exc
+
+
+@mcp.tool()
+def buscar_perfil_economico_regiao_ibge(
+    nome_regiao: str, top_cnaes: int = 10
+) -> Dict[str, Any]:
+    """
+    Retorna o perfil econômico agregado de uma Região Geográfica do IBGE (Imediata ou Intermediária),
+    somando as empresas ativas de todos os municípios que compõem aquele polo regional.
+
+    Permite análises econômicas de polos regionais (ex: 'Ponta Grossa', 'Curitiba', 'Campinas', 'Ribeirão Preto').
+
+    Args:
+        nome_regiao: Nome da Região Imediata ou Intermediária (ex: 'Ponta Grossa', 'Campinas').
+        top_cnaes: Quantidade de principais atividades CNAEs no ranking agregado (padrão: 10).
+
+    Returns:
+        Dicionário com a lista de municípios integrantes, total regional de empresas ativas e principais CNAEs.
+    """
+    regiao_str = nome_regiao.strip()
+    query = """
+    MATCH (ri)
+    WHERE (ri:RegiaoImediata OR ri:RegiaoIntermediaria) AND toLower(ri.nome) = toLower($nome_regiao)
+    MATCH (m:Municipio)-[:PERTENCE_A*1..2]->(ri)
+    MATCH (m)-[:PERTENCE_A*1..3]->(e:Estado)
+    OPTIONAL MATCH (c:CNAE)-[r:PRESENTE_EM]->(m)
+    WITH ri, e, collect(DISTINCT m.nome) AS municipios, c, 
+         sum(coalesce(r.estoque_ativas, r.quantidade_empresas_ativas, 0)) AS cnae_empresas_total
+    ORDER BY cnae_empresas_total DESC
+    WITH ri, e, municipios,
+         sum(cnae_empresas_total) AS total_empresas_regiao,
+         collect({
+             codigo: c.codigo,
+             descricao: c.descricao,
+             secao: c.secao,
+             empresas_ativas: cnae_empresas_total
+         })[0..$top_cnaes] AS top_atividades
+    RETURN ri.nome AS nome_regiao,
+           labels(ri)[0] AS tipo_regiao,
+           e.uf AS uf,
+           municipios,
+           total_empresas_regiao,
+           top_atividades
+    LIMIT 1
+    """
+    try:
+        with db_client.session() as session:
+            result = session.run(query, nome_regiao=regiao_str, top_cnaes=top_cnaes).single()
+            if not result or not result["nome_regiao"]:
+                return {
+                    "encontrado": False,
+                    "termo_pesquisa": regiao_str,
+                    "mensagem": f"Região geográfica '{regiao_str}' não localizada no IBGE.",
+                }
+
+            atividades = [
+                {
+                    "codigo": ativ["codigo"],
+                    "descricao": ativ["descricao"],
+                    "secao": ativ["secao"],
+                    "empresas_ativas": int(ativ["empresas_ativas"]),
+                }
+                for ativ in result["top_atividades"]
+                if ativ and ativ["codigo"] is not None
+            ]
+
+            return {
+                "encontrado": True,
+                "regiao_nome": result["nome_regiao"],
+                "tipo_regiao_ibge": "Região Imediata" if result["tipo_regiao"] == "RegiaoImediata" else "Região Intermediária",
+                "uf": result["uf"],
+                "total_municipios_integrantes": len(result["municipios"]),
+                "municipios": sorted(result["municipios"]),
+                "total_empresas_ativas_polo_regional": int(result["total_empresas_regiao"] or 0),
+                "principais_cnaes_polo_regional": atividades,
+            }
+    except Neo4jError as exc:
+        logger.error("Erro Cypher em buscar_perfil_economico_regiao_ibge: %s", exc.message)
         raise RuntimeError(f"Falha na consulta ao banco de grafos: {exc.message}") from exc
 
 

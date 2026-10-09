@@ -146,8 +146,12 @@ class ReceitaGraphIngestor:
             "CREATE CONSTRAINT ON (m:Municipio) ASSERT m.codigo_ibge IS UNIQUE;",
             "CREATE CONSTRAINT ON (e:Estado) ASSERT e.uf IS UNIQUE;",
             "CREATE CONSTRAINT ON (r:Regiao) ASSERT r.nome IS UNIQUE;",
+            "CREATE CONSTRAINT ON (ri:RegiaoImediata) ASSERT ri.codigo IS UNIQUE;",
+            "CREATE CONSTRAINT ON (rint:RegiaoIntermediaria) ASSERT rint.codigo IS UNIQUE;",
             "CREATE INDEX ON :CNAE(codigo_raw);",
             "CREATE INDEX ON :Municipio(nome);",
+            "CREATE INDEX ON :RegiaoImediata(nome);",
+            "CREATE INDEX ON :RegiaoIntermediaria(nome);",
         ]
         with self._driver.session() as s:
             for q in queries:
@@ -179,13 +183,14 @@ class ReceitaGraphIngestor:
 
     def processar_e_inserir_brasil_inteiro(self) -> Dict[str, Dict[str, Any]]:
         """
-        Carrega todos os 5.570 municípios do Brasil e 27 Estados vinculados às 5 Macrorregiões.
+        Carrega todos os 5.570 municípios do Brasil e 27 Estados vinculados às 5 Macrorregiões,
+        bem como as Regiões Geográficas Imediatas e Intermediárias oficiais do IBGE.
         Cria o mapeamento siafi_id (código TOM de 4 dígitos da Receita) -> info município.
         """
-        logger.info("Carregando malha territorial completa de todos os 5.570 municípios do Brasil...")
+        logger.info("Carregando malha territorial completa de todos os 5.570 municípios do Brasil e Regiões IBGE...")
         con = duckdb.connect(":memory:")
 
-        # 1. Estados e Regiões
+        # 1. Estados e Macrorregiões
         estados = con.execute("SELECT uf, nome, regiao FROM 'estados.csv'").fetchall()
         batch_estados = [{"uf": r[0], "nome": r[1], "regiao": r[2]} for r in estados]
         q_estados = """
@@ -199,7 +204,7 @@ class ReceitaGraphIngestor:
         self.executar_batch(q_estados, batch_estados, "Estados e Regiões")
         logger.info("Inseridos 27 estados vinculados às 5 Macrorregiões.")
 
-        # 2. Todos os Municípios (IBGE + SIAFI)
+        # 2. Todos os Municípios com Regiões Imediatas e Intermediárias do IBGE
         muns = con.execute("""
             SELECT 
                 cast(m.codigo_ibge as varchar) as codigo_ibge,
@@ -207,15 +212,22 @@ class ReceitaGraphIngestor:
                 cast(m.latitude as double) as lat,
                 cast(m.longitude as double) as lon,
                 e.uf,
-                lpad(trim(cast(m.siafi_id as varchar)), 4, '0') as siafi_tom
+                lpad(trim(cast(m.siafi_id as varchar)), 4, '0') as siafi_tom,
+                coalesce(r.codigo_regiao_imediata, '') as cod_imed,
+                coalesce(r.nome_regiao_imediata, '') as nome_imed,
+                coalesce(r.codigo_regiao_intermediaria, '') as cod_inter,
+                coalesce(r.nome_regiao_intermediaria, '') as nome_inter,
+                coalesce(r.nome_microrregiao, '') as nome_micro,
+                coalesce(r.nome_mesorregiao, '') as nome_meso
             FROM 'municipios.csv' m
             JOIN 'estados.csv' e ON m.codigo_uf = e.codigo_uf
+            LEFT JOIN 'regioes_ibge.csv' r ON cast(m.codigo_ibge as varchar) = cast(r.codigo_ibge as varchar)
         """).fetchall()
 
         batch_muns: List[Dict[str, Any]] = []
         siafi_lookup: Dict[str, Dict[str, Any]] = {}
 
-        for ibge, nome, lat, lon, uf, siafi_tom in muns:
+        for ibge, nome, lat, lon, uf, siafi_tom, cod_imed, nome_imed, cod_inter, nome_inter, nome_micro, nome_meso in muns:
             info = {
                 "codigo_ibge": str(ibge),
                 "nome": nome,
@@ -223,6 +235,12 @@ class ReceitaGraphIngestor:
                 "lon": float(lon) if lon is not None else 0.0,
                 "uf": uf,
                 "siafi_tom": siafi_tom,
+                "cod_imed": str(cod_imed),
+                "nome_imed": str(nome_imed),
+                "cod_inter": str(cod_inter),
+                "nome_inter": str(nome_inter),
+                "nome_micro": str(nome_micro),
+                "nome_meso": str(nome_meso),
             }
             batch_muns.append(info)
             siafi_lookup[siafi_tom] = info
@@ -230,15 +248,27 @@ class ReceitaGraphIngestor:
         q_muns = """
         UNWIND $batch AS item
         MERGE (m:Municipio {codigo_ibge: item.codigo_ibge})
-        ON CREATE SET m.nome = item.nome, m.lat = item.lat, m.lon = item.lon
-        ON MATCH SET m.nome = item.nome, m.lat = item.lat, m.lon = item.lon
+        ON CREATE SET m.nome = item.nome, m.lat = item.lat, m.lon = item.lon,
+                      m.regiao_imediata = item.nome_imed, m.regiao_intermediaria = item.nome_inter,
+                      m.microrregiao = item.nome_micro, m.mesorregiao = item.nome_meso
+        ON MATCH SET m.nome = item.nome, m.lat = item.lat, m.lon = item.lon,
+                     m.regiao_imediata = item.nome_imed, m.regiao_intermediaria = item.nome_inter,
+                     m.microrregiao = item.nome_micro, m.mesorregiao = item.nome_meso
         WITH m, item
         MATCH (e:Estado {uf: item.uf})
-        MERGE (m)-[:PERTENCE_A]->(e)
+        MERGE (ri:RegiaoImediata {codigo: item.cod_imed})
+        ON CREATE SET ri.nome = item.nome_imed, ri.uf = item.uf
+        ON MATCH SET ri.nome = item.nome_imed, ri.uf = item.uf
+        MERGE (rint:RegiaoIntermediaria {codigo: item.cod_inter})
+        ON CREATE SET rint.nome = item.nome_inter, rint.uf = item.uf
+        ON MATCH SET rint.nome = item.nome_inter, rint.uf = item.uf
+        MERGE (m)-[:PERTENCE_A]->(ri)
+        MERGE (ri)-[:PERTENCE_A]->(rint)
+        MERGE (rint)-[:PERTENCE_A]->(e)
         """
         lote_tam = 1000
         for i in range(0, len(batch_muns), lote_tam):
-            self.executar_batch(q_muns, batch_muns[i : i + lote_tam], f"Municípios {i}-{i+lote_tam}")
+            self.executar_batch(q_muns, batch_muns[i : i + lote_tam], f"Municípios e Regiões IBGE {i}-{i+lote_tam}")
 
         logger.info("Inseridos %d municípios de todo o território nacional.", len(batch_muns))
         return siafi_lookup
