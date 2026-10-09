@@ -29,6 +29,7 @@ load_dotenv()
 class EstadoDTO:
     uf: str
     nome: str
+    regiao: str
 
 
 @dataclass(frozen=True)
@@ -63,10 +64,22 @@ class CoocorrenciaLocalDTO:
 
 
 @dataclass(frozen=True)
+class FilialExpansaoDTO:
+    cnae_matriz: str
+    cnae_filial: str
+    frequencia: int
+
+
+@dataclass(frozen=True)
 class PresencaCNAEDTO:
     codigo_cnae: str
     codigo_ibge: str
     quantidade_empresas_ativas: int
+    estoque_ativas: int
+    abertas_ultimos_5_anos: int = 0
+    encerradas_ultimos_5_anos: int = 0
+    taxa_sobrevivencia_5_anos: float = 0.0
+    saldo_recente: int = 0
 
 
 class MemgraphIngestor:
@@ -110,6 +123,7 @@ class MemgraphIngestor:
             "CREATE CONSTRAINT ON (c:CNAE) ASSERT c.codigo IS UNIQUE;",
             "CREATE CONSTRAINT ON (m:Municipio) ASSERT m.codigo_ibge IS UNIQUE;",
             "CREATE CONSTRAINT ON (e:Estado) ASSERT e.uf IS UNIQUE;",
+            "CREATE CONSTRAINT ON (r:Regiao) ASSERT r.nome IS UNIQUE;",
         ]
 
         with self._driver.session() as session:
@@ -124,18 +138,22 @@ class MemgraphIngestor:
                     logger.warning("Falha ao registrar constraint '%s': %s", query, exc)
 
     def inserir_estados(self, estados: List[EstadoDTO]) -> None:
-        """Insere nós (:Estado {uf, nome}) em lote utilizando UNWIND."""
+        """Insere nós (:Regiao), (:Estado) e arestas (:Estado)-[:PERTENCE_A]->(:Regiao)."""
         if not self._driver:
             raise RuntimeError("Driver não inicializado.")
 
         query = """
         UNWIND $batch AS item
+        MERGE (r:Regiao {nome: item.regiao})
         MERGE (e:Estado {uf: item.uf})
         ON CREATE SET e.nome = item.nome
         ON MATCH SET e.nome = item.nome
+        MERGE (e)-[:PERTENCE_A]->(r)
         """
-        payload: List[Dict[str, Any]] = [{"uf": e.uf, "nome": e.nome} for e in estados]
-        self._executar_batch(query, payload, "Estados")
+        payload: List[Dict[str, Any]] = [
+            {"uf": e.uf, "nome": e.nome, "regiao": e.regiao} for e in estados
+        ]
+        self._executar_batch(query, payload, "Estados e Regiões")
 
     def inserir_municipios(self, municipios: List[MunicipioDTO]) -> None:
         """
@@ -287,10 +305,37 @@ class MemgraphIngestor:
             )
         self._executar_batch(query, payload, "Arestas COOCORRE_EM (Locais)")
 
+    def inserir_expansao_filiais(
+        self, expansoes: List[FilialExpansaoDTO]
+    ) -> None:
+        """
+        Insere arestas de expansão corporativa Matriz -> Filiais:
+        (:CNAE)-[:GERA_FILIAL {frequencia}]->(:CNAE).
+        """
+        if not self._driver:
+            raise RuntimeError("Driver não inicializado.")
+
+        query = """
+        UNWIND $batch AS item
+        MATCH (c1:CNAE {codigo: item.cnae_matriz})
+        MATCH (c2:CNAE {codigo: item.cnae_filial})
+        MERGE (c1)-[r:GERA_FILIAL]->(c2)
+        SET r.frequencia = item.frequencia
+        """
+        payload: List[Dict[str, Any]] = [
+            {
+                "cnae_matriz": exp.cnae_matriz,
+                "cnae_filial": exp.cnae_filial,
+                "frequencia": int(exp.frequencia),
+            }
+            for exp in expansoes
+        ]
+        self._executar_batch(query, payload, "Arestas GERA_FILIAL (Matriz -> Filial)")
+
     def inserir_presenca_cnaes(self, presencas: List[PresencaCNAEDTO]) -> None:
         """
-        Insere arestas de presença econômica:
-        (:CNAE)-[:PRESENTE_EM {quantidade_empresas_ativas}]->(:Municipio).
+        Insere arestas de presença econômica e dinâmica de sobrevivência:
+        (:CNAE)-[:PRESENTE_EM {estoque_ativas, abertas_ultimos_5_anos, ...}]->(:Municipio).
         """
         if not self._driver:
             raise RuntimeError("Driver não inicializado.")
@@ -300,17 +345,27 @@ class MemgraphIngestor:
         MATCH (c:CNAE {codigo: item.codigo_cnae})
         MATCH (m:Municipio {codigo_ibge: item.codigo_ibge})
         MERGE (c)-[r:PRESENTE_EM]->(m)
-        SET r.quantidade_empresas_ativas = item.quantidade_empresas_ativas
+        SET r.quantidade_empresas_ativas = item.quantidade_empresas_ativas,
+            r.estoque_ativas = item.estoque_ativas,
+            r.abertas_ultimos_5_anos = item.abertas_ultimos_5_anos,
+            r.encerradas_ultimos_5_anos = item.encerradas_ultimos_5_anos,
+            r.taxa_sobrevivencia_5_anos = item.taxa_sobrevivencia_5_anos,
+            r.saldo_recente = item.saldo_recente
         """
         payload: List[Dict[str, Any]] = [
             {
                 "codigo_cnae": p.codigo_cnae,
                 "codigo_ibge": p.codigo_ibge,
                 "quantidade_empresas_ativas": int(p.quantidade_empresas_ativas),
+                "estoque_ativas": int(p.estoque_ativas),
+                "abertas_ultimos_5_anos": int(p.abertas_ultimos_5_anos),
+                "encerradas_ultimos_5_anos": int(p.encerradas_ultimos_5_anos),
+                "taxa_sobrevivencia_5_anos": float(p.taxa_sobrevivencia_5_anos),
+                "saldo_recente": int(p.saldo_recente),
             }
             for p in presencas
         ]
-        self._executar_batch(query, payload, "Arestas PRESENTE_EM")
+        self._executar_batch(query, payload, "Arestas PRESENTE_EM Enriquecidas")
 
     def _executar_batch(
         self, query: str, batch: List[Dict[str, Any]], descricao: str
@@ -359,8 +414,8 @@ def obter_dataset_sintetico() -> Tuple[
     - Coocorrências simuladas de empresas ativas
     """
     estados: List[EstadoDTO] = [
-        EstadoDTO(uf="SP", nome="São Paulo"),
-        EstadoDTO(uf="RJ", nome="Rio de Janeiro"),
+        EstadoDTO(uf="SP", nome="São Paulo", regiao="Sudeste"),
+        EstadoDTO(uf="RJ", nome="Rio de Janeiro", regiao="Sudeste"),
     ]
 
     municipios: List[MunicipioDTO] = [
@@ -401,6 +456,13 @@ def obter_dataset_sintetico() -> Tuple[
         ),
     ]
 
+    # Expansão corporativa de Matriz para Filiais
+    expansoes_filiais: List[FilialExpansaoDTO] = [
+        FilialExpansaoDTO(cnae_matriz="6201-5/01", cnae_filial="6204-0/00", frequencia=3150),
+        FilialExpansaoDTO(cnae_matriz="6201-5/01", cnae_filial="6202-3/00", frequencia=2480),
+        FilialExpansaoDTO(cnae_matriz="6202-3/00", cnae_filial="6204-0/00", frequencia=1820),
+    ]
+
     # Coocorrências em empresas ativas em âmbito nacional
     coocorrencias_globais: List[CoocorrenciaGlobalDTO] = [
         CoocorrenciaGlobalDTO(cnae_a="6201-5/01", cnae_b="6202-3/00", frequencia=1850),
@@ -427,23 +489,32 @@ def obter_dataset_sintetico() -> Tuple[
         CoocorrenciaLocalDTO(cnae_a="6201-5/01", cnae_b="4751-2/01", codigo_ibge="3301702", frequencia=45),
     ]
 
-    # Presença de empresas ativas por CNAE em cada município
+    # Presença de empresas ativas e dinâmicas de sobrevivência por CNAE em cada município
     presencas: List[PresencaCNAEDTO] = [
-        PresencaCNAEDTO(codigo_cnae="6201-5/01", codigo_ibge="3550308", quantidade_empresas_ativas=14200),
-        PresencaCNAEDTO(codigo_cnae="6202-3/00", codigo_ibge="3550308", quantidade_empresas_ativas=9800),
-        PresencaCNAEDTO(codigo_cnae="6204-0/00", codigo_ibge="3550308", quantidade_empresas_ativas=7300),
-        PresencaCNAEDTO(codigo_cnae="4751-2/01", codigo_ibge="3550308", quantidade_empresas_ativas=3100),
-        PresencaCNAEDTO(codigo_cnae="6201-5/01", codigo_ibge="3518800", quantidade_empresas_ativas=1850),
-        PresencaCNAEDTO(codigo_cnae="6202-3/00", codigo_ibge="3518800", quantidade_empresas_ativas=1200),
-        PresencaCNAEDTO(codigo_cnae="4751-2/01", codigo_ibge="3518800", quantidade_empresas_ativas=890),
-        PresencaCNAEDTO(codigo_cnae="6201-5/01", codigo_ibge="3304557", quantidade_empresas_ativas=7900),
-        PresencaCNAEDTO(codigo_cnae="6202-3/00", codigo_ibge="3304557", quantidade_empresas_ativas=5400),
-        PresencaCNAEDTO(codigo_cnae="6204-0/00", codigo_ibge="3304557", quantidade_empresas_ativas=4100),
-        PresencaCNAEDTO(codigo_cnae="6201-5/01", codigo_ibge="3301702", quantidade_empresas_ativas=950),
-        PresencaCNAEDTO(codigo_cnae="4751-2/01", codigo_ibge="3301702", quantidade_empresas_ativas=620),
+        PresencaCNAEDTO(codigo_cnae="6201-5/01", codigo_ibge="3550308", quantidade_empresas_ativas=14200, estoque_ativas=14200, abertas_ultimos_5_anos=4970, encerradas_ultimos_5_anos=1392, taxa_sobrevivencia_5_anos=0.720, saldo_recente=745),
+        PresencaCNAEDTO(codigo_cnae="6202-3/00", codigo_ibge="3550308", quantidade_empresas_ativas=9800, estoque_ativas=9800, abertas_ultimos_5_anos=3430, encerradas_ultimos_5_anos=960, taxa_sobrevivencia_5_anos=0.720, saldo_recente=514),
+        PresencaCNAEDTO(codigo_cnae="6204-0/00", codigo_ibge="3550308", quantidade_empresas_ativas=7300, estoque_ativas=7300, abertas_ultimos_5_anos=2555, encerradas_ultimos_5_anos=715, taxa_sobrevivencia_5_anos=0.720, saldo_recente=383),
+        PresencaCNAEDTO(codigo_cnae="4751-2/01", codigo_ibge="3550308", quantidade_empresas_ativas=3100, estoque_ativas=3100, abertas_ultimos_5_anos=1085, encerradas_ultimos_5_anos=304, taxa_sobrevivencia_5_anos=0.720, saldo_recente=162),
+        PresencaCNAEDTO(codigo_cnae="6201-5/01", codigo_ibge="3518800", quantidade_empresas_ativas=1850, estoque_ativas=1850, abertas_ultimos_5_anos=647, encerradas_ultimos_5_anos=181, taxa_sobrevivencia_5_anos=0.720, saldo_recente=97),
+        PresencaCNAEDTO(codigo_cnae="6202-3/00", codigo_ibge="3518800", quantidade_empresas_ativas=1200, estoque_ativas=1200, abertas_ultimos_5_anos=420, encerradas_ultimos_5_anos=117, taxa_sobrevivencia_5_anos=0.721, saldo_recente=63),
+        PresencaCNAEDTO(codigo_cnae="4751-2/01", codigo_ibge="3518800", quantidade_empresas_ativas=890, estoque_ativas=890, abertas_ultimos_5_anos=311, encerradas_ultimos_5_anos=87, taxa_sobrevivencia_5_anos=0.720, saldo_recente=46),
+        PresencaCNAEDTO(codigo_cnae="6201-5/01", codigo_ibge="3304557", quantidade_empresas_ativas=7900, estoque_ativas=7900, abertas_ultimos_5_anos=2765, encerradas_ultimos_5_anos=774, taxa_sobrevivencia_5_anos=0.720, saldo_recente=414),
+        PresencaCNAEDTO(codigo_cnae="6202-3/00", codigo_ibge="3304557", quantidade_empresas_ativas=5400, estoque_ativas=5400, abertas_ultimos_5_anos=1890, encerradas_ultimos_5_anos=529, taxa_sobrevivencia_5_anos=0.720, saldo_recente=283),
+        PresencaCNAEDTO(codigo_cnae="6204-0/00", codigo_ibge="3304557", quantidade_empresas_ativas=4100, estoque_ativas=4100, abertas_ultimos_5_anos=1435, encerradas_ultimos_5_anos=401, taxa_sobrevivencia_5_anos=0.721, saldo_recente=215),
+        PresencaCNAEDTO(codigo_cnae="6201-5/01", codigo_ibge="3301702", quantidade_empresas_ativas=950, estoque_ativas=950, abertas_ultimos_5_anos=332, encerradas_ultimos_5_anos=93, taxa_sobrevivencia_5_anos=0.720, saldo_recente=50),
+        PresencaCNAEDTO(codigo_cnae="4751-2/01", codigo_ibge="3301702", quantidade_empresas_ativas=620, estoque_ativas=620, abertas_ultimos_5_anos=217, encerradas_ultimos_5_anos=61, taxa_sobrevivencia_5_anos=0.719, saldo_recente=32),
     ]
 
-    return estados, municipios, divisas_adjacencia, cnaes, coocorrencias_globais, coocorrencias_locais, presencas
+    return (
+        estados,
+        municipios,
+        divisas_adjacencia,
+        cnaes,
+        expansoes_filiais,
+        coocorrencias_globais,
+        coocorrencias_locais,
+        presencas,
+    )
 
 
 def main() -> None:
@@ -466,6 +537,7 @@ def main() -> None:
             municipios,
             divisas_adjacencia,
             cnaes,
+            expansoes_filiais,
             coocorrencias_globais,
             coocorrencias_locais,
             presencas,
@@ -476,7 +548,7 @@ def main() -> None:
             m.codigo_ibge: (m.lat, m.lon) for m in municipios
         }
 
-        logger.info("Inserindo Estados...")
+        logger.info("Inserindo Estados e Regiões...")
         ingestor.inserir_estados(estados)
 
         logger.info("Inserindo Municípios e relacionamentos territoriais...")
@@ -488,13 +560,16 @@ def main() -> None:
         logger.info("Inserindo CNAEs...")
         ingestor.inserir_cnaes(cnaes)
 
+        logger.info("Inserindo Relações de Expansão Matriz -> Filiais...")
+        ingestor.inserir_expansao_filiais(expansoes_filiais)
+
         logger.info("Inserindo Coocorrências Globais...")
         ingestor.inserir_coocorrencias_globais(coocorrencias_globais)
 
         logger.info("Inserindo Coocorrências Locais...")
         ingestor.inserir_coocorrencias_locais(coocorrencias_locais)
 
-        logger.info("Inserindo Presenças de CNAEs...")
+        logger.info("Inserindo Presenças e Dinâmicas de Sobrevivência...")
         ingestor.inserir_presenca_cnaes(presencas)
 
         logger.info("Pipeline de Ingestão e Modelagem de Grafo concluído com sucesso!")

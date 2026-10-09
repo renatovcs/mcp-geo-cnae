@@ -1,10 +1,14 @@
 """
-Pipeline de Ingestão de Dados Reais da Receita Federal para Memgraph (GraphRAG).
+Pipeline de Ingestão de Dados Oficiais da Receita Federal para Memgraph (GraphRAG Nacional).
 
-Processa o dataset de 7,16 milhões de empresas ativas da Receita Federal
-armazenado em /mnt/e/anotae/data/receita/processed/empresas_ativas.parquet,
-agregando coocorrências econômicas e presenças municipais via DuckDB
-e inserindo no Memgraph em lotes otimizados com UNWIND.
+Processa os arquivos brutos da Receita Federal diretamente do diretório 'dados_receita':
+- Estabelecimentos (*.ESTABELE ou Estabelecimentos*.zip)
+- Catálogo de CNAEs (*.CNAECSV ou Cnaes.zip)
+- Mapeamento territorial completo dos 5.570 municípios do Brasil via SIAFI/TOM -> IBGE
+- Dinâmicas de sobrevivência empresarial (Sebrae/IBGE - 5 anos)
+- Coocorrências econômicas e expansão corporativa Matriz -> Filiais ([:GERA_FILIAL])
+
+Executa em streaming com DuckDB em memória (:memory:) sem gerar arquivos intermediários em disco.
 """
 
 import csv
@@ -13,6 +17,7 @@ import logging
 import os
 import time
 import unicodedata
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import duckdb
@@ -23,23 +28,28 @@ from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("ingestao_receita")
+logger = logging.getLogger("ingestao_receita_brasil")
 
 load_dotenv()
 
-PARQUET_PATH = os.getenv(
-    "PARQUET_PATH", "/mnt/e/anotae/data/receita/processed/empresas_ativas.parquet"
-)
-RECEITA_DIR = os.getenv("RECEITA_DIR", "/mnt/e/anotae/data/receita")
+# Diretórios e Configurações de Conexão
 MEMGRAPH_URI = os.getenv("MEMGRAPH_URI", "bolt://localhost:7687")
 MEMGRAPH_USER = os.getenv("MEMGRAPH_USER", "")
 MEMGRAPH_PASSWORD = os.getenv("MEMGRAPH_PASSWORD", "")
 
+POSSIVEIS_DIRS_RECEITA = [
+    os.getenv("DADOS_RECEITA_DIR"),
+    "/dados_receita",
+    "/home/ubuntu/dados_receita",
+    "./dados_receita",
+    "../dados_receita",
+]
+
 
 def normalizar_texto(texto: Optional[str]) -> str:
-    """Normaliza strings removendo acentos e pontuações para matching tolerante."""
+    """Normaliza strings removendo acentuação para matching tolerante."""
     if not texto:
         return ""
     n = unicodedata.normalize("NFKD", str(texto)).encode("ASCII", "ignore").decode("ASCII")
@@ -47,7 +57,7 @@ def normalizar_texto(texto: Optional[str]) -> str:
 
 
 def formatar_cnae(codigo_7digitos: str) -> str:
-    """Converte '6201501' para a máscara padrão '6201-5/01'."""
+    """Converte '6201501' para a máscara padrão oficial '6201-5/01'."""
     c = codigo_7digitos.strip()
     if len(c) == 7:
         return f"{c[:4]}-{c[4]}/{c[5:]}"
@@ -55,7 +65,7 @@ def formatar_cnae(codigo_7digitos: str) -> str:
 
 
 def obter_secao_cnae(codigo_7digitos: str) -> str:
-    """Classifica a Seção oficial do CNAE (A até U) a partir dos dois primeiros dígitos (Divisão)."""
+    """Classifica a Seção oficial do CNAE (A até U) a partir dos dois primeiros dígitos."""
     if len(codigo_7digitos) < 2:
         return "OUTROS"
     try:
@@ -88,13 +98,27 @@ def obter_secao_cnae(codigo_7digitos: str) -> str:
 
 
 class ReceitaGraphIngestor:
-    """Orquestrador de carga e modelagem do grafo de dados da Receita Federal."""
+    """Orquestrador da modelagem e ingestão do grafo nacional da Receita Federal."""
 
     def __init__(self, uri: str, user: str = "", password: str = "") -> None:
         self.uri = uri
         self.user = user
         self.password = password
         self._driver: Optional[Driver] = None
+        self.dados_dir: Path = self._identificar_diretorio_dados()
+
+    def _identificar_diretorio_dados(self) -> Path:
+        """Localiza a pasta com os dados da Receita Federal."""
+        for d in POSSIVEIS_DIRS_RECEITA:
+            if d and os.path.isdir(d):
+                logger.info("Diretório de dados da Receita localizado: %s", d)
+                return Path(d)
+        caminho_padrao = Path("/dados_receita")
+        logger.warning(
+            "Nenhum diretório de dados encontrado nas opções comuns. Utilizando padrão: %s",
+            caminho_padrao,
+        )
+        return caminho_padrao
 
     def connect(self) -> Driver:
         auth_token: Optional[Auth] = None
@@ -102,7 +126,7 @@ class ReceitaGraphIngestor:
             auth_token = (self.user, self.password)  # type: ignore[assignment]
         self._driver = GraphDatabase.driver(self.uri, auth=auth_token)
         self._driver.verify_connectivity()
-        logger.info("Conectado ao Memgraph em %s", self.uri)
+        logger.info("Conectado com sucesso ao Memgraph em %s", self.uri)
         return self._driver
 
     def close(self) -> None:
@@ -111,7 +135,7 @@ class ReceitaGraphIngestor:
             logger.info("Conexão com Memgraph encerrada.")
 
     def criar_constraints(self) -> None:
-        """Cria constraints e índices para garantir performance e unicidade."""
+        """Cria constraints e índices essenciais no Memgraph."""
         if not self._driver:
             raise RuntimeError("Driver não conectado.")
 
@@ -119,6 +143,7 @@ class ReceitaGraphIngestor:
             "CREATE CONSTRAINT ON (c:CNAE) ASSERT c.codigo IS UNIQUE;",
             "CREATE CONSTRAINT ON (m:Municipio) ASSERT m.codigo_ibge IS UNIQUE;",
             "CREATE CONSTRAINT ON (e:Estado) ASSERT e.uf IS UNIQUE;",
+            "CREATE CONSTRAINT ON (r:Regiao) ASSERT r.nome IS UNIQUE;",
             "CREATE INDEX ON :CNAE(codigo_raw);",
             "CREATE INDEX ON :Municipio(nome);",
         ]
@@ -130,12 +155,12 @@ class ReceitaGraphIngestor:
                     logger.info("Aviso em constraint/índice: %s", exc.message)
 
     def limpar_banco(self) -> None:
-        """Limpa o grafo antes da carga completa."""
+        """Limpa o grafo anterior caso necessário."""
         if not self._driver:
             raise RuntimeError("Driver não conectado.")
         with self._driver.session() as s:
             s.run("MATCH (n) DETACH DELETE n;")
-            logger.info("Grafo anterior limpo com sucesso.")
+            logger.info("Grafo anterior limpo.")
 
     def executar_batch(self, query: str, batch: List[Dict[str, Any]], desc: str) -> None:
         """Executa um lote de itens parametrizado com UNWIND."""
@@ -150,67 +175,56 @@ class ReceitaGraphIngestor:
             logger.error("Erro ao executar lote '%s': %s", desc, exc)
             raise
 
-    def processar_e_inserir_estados_e_municipios(
-        self,
-    ) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    def processar_e_inserir_brasil_inteiro(self) -> Dict[str, Dict[str, Any]]:
         """
-        Carrega os municípios e estados das tabelas geográficas oficiais do IBGE,
-        cria os nós (:Estado) e (:Municipio) e estabelece a relação [:PERTENCE_A].
-        Retorna o mapa (municipio_norm, uf) -> {codigo_ibge, nome, lat, lon, uf}.
+        Carrega todos os 5.570 municípios do Brasil e 27 Estados vinculados às 5 Macrorregiões.
+        Cria o mapeamento siafi_id (código TOM de 4 dígitos da Receita) -> info município.
         """
-        logger.info("Carregando tabelas geográficas do IBGE...")
-        con = duckdb.connect()
+        logger.info("Carregando malha territorial completa de todos os 5.570 municípios do Brasil...")
+        con = duckdb.connect(":memory:")
 
-        # 1. Estados
-        estados = con.execute("SELECT uf, nome FROM 'estados.csv'").fetchall()
-        batch_estados = [{"uf": r[0], "nome": r[1]} for r in estados]
+        # 1. Estados e Regiões
+        estados = con.execute("SELECT uf, nome, regiao FROM 'estados.csv'").fetchall()
+        batch_estados = [{"uf": r[0], "nome": r[1], "regiao": r[2]} for r in estados]
         q_estados = """
         UNWIND $batch AS item
+        MERGE (r:Regiao {nome: item.regiao})
         MERGE (e:Estado {uf: item.uf})
         ON CREATE SET e.nome = item.nome
         ON MATCH SET e.nome = item.nome
+        MERGE (e)-[:PERTENCE_A]->(r)
         """
-        self.executar_batch(q_estados, batch_estados, "Estados")
-        logger.info("Inseridos %d estados.", len(batch_estados))
+        self.executar_batch(q_estados, batch_estados, "Estados e Regiões")
+        logger.info("Inseridos 27 estados vinculados às 5 Macrorregiões.")
 
-        # 2. Municípios presentes no parquet
-        muns_parquet = con.execute(f"""
-            SELECT DISTINCT municipio, uf 
-            FROM '{PARQUET_PATH}'
-            WHERE municipio IS NOT NULL AND uf IS NOT NULL
-        """).fetchall()
-
-        # Tabela completa de municípios IBGE
-        muns_ibge = con.execute("""
-            SELECT m.codigo_ibge, m.nome, e.uf, m.latitude, m.longitude
+        # 2. Todos os Municípios (IBGE + SIAFI)
+        muns = con.execute("""
+            SELECT 
+                cast(m.codigo_ibge as varchar) as codigo_ibge,
+                m.nome,
+                cast(m.latitude as double) as lat,
+                cast(m.longitude as double) as lon,
+                e.uf,
+                lpad(trim(cast(m.siafi_id as varchar)), 4, '0') as siafi_tom
             FROM 'municipios.csv' m
             JOIN 'estados.csv' e ON m.codigo_uf = e.codigo_uf
         """).fetchall()
 
-        ibge_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        for ibge, nome, uf, lat, lon in muns_ibge:
-            key = (normalizar_texto(nome), uf.strip().upper())
-            ibge_lookup[key] = {
+        batch_muns: List[Dict[str, Any]] = []
+        siafi_lookup: Dict[str, Dict[str, Any]] = {}
+
+        for ibge, nome, lat, lon, uf, siafi_tom in muns:
+            info = {
                 "codigo_ibge": str(ibge),
                 "nome": nome,
-                "uf": uf.strip().upper(),
-                "lat": float(lat),
-                "lon": float(lon),
+                "lat": float(lat) if lat is not None else 0.0,
+                "lon": float(lon) if lon is not None else 0.0,
+                "uf": uf,
+                "siafi_tom": siafi_tom,
             }
+            batch_muns.append(info)
+            siafi_lookup[siafi_tom] = info
 
-        municipios_para_inserir: Dict[str, Dict[str, Any]] = {}
-        municipios_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
-
-        for mun, uf in muns_parquet:
-            norm_key = (normalizar_texto(mun), uf.strip().upper())
-            if norm_key in ibge_lookup:
-                info = ibge_lookup[norm_key]
-                municipios_para_inserir[info["codigo_ibge"]] = info
-                municipios_map[norm_key] = info
-            else:
-                logger.warning("Município não localizado no IBGE: %s/%s", mun, uf)
-
-        batch_muns = list(municipios_para_inserir.values())
         q_muns = """
         UNWIND $batch AS item
         MERGE (m:Municipio {codigo_ibge: item.codigo_ibge})
@@ -220,52 +234,46 @@ class ReceitaGraphIngestor:
         MATCH (e:Estado {uf: item.uf})
         MERGE (m)-[:PERTENCE_A]->(e)
         """
-        self.executar_batch(q_muns, batch_muns, "Municípios e PERTENCE_A")
-        logger.info("Inseridos %d municípios com conexões a seus Estados.", len(batch_muns))
+        lote_tam = 1000
+        for i in range(0, len(batch_muns), lote_tam):
+            self.executar_batch(q_muns, batch_muns[i : i + lote_tam], f"Municípios {i}-{i+lote_tam}")
 
-        return municipios_map
+        logger.info("Inseridos %d municípios de todo o território nacional.", len(batch_muns))
+        return siafi_lookup
 
-    def calcular_e_inserir_divisas(
-        self, municipios_map: Dict[Tuple[str, str], Dict[str, Any]]
-    ) -> None:
-        """
-        Calcula as distâncias geodésicas (em km) via Geopy entre municípios vizinhos
-        e gera arestas (:Municipio)-[:FAZ_DIVISA_COM {distancia_km}]-(:Municipio).
-        """
-        logger.info("Calculando divisas e distâncias geodésicas entre municípios...")
-        lista_muns = list({m["codigo_ibge"]: m for m in municipios_map.values()}.values())
-
-        # Agrupa por UF para conectar vizinhos geográficos
+    def calcular_divisas_geograficas(self, siafi_lookup: Dict[str, Dict[str, Any]]) -> None:
+        """Gera divisas territoriais entre municípios por proximidade geográfica."""
+        logger.info("Calculando divisas e fronteiras territoriais municipais...")
+        lista_muns = list(siafi_lookup.values())
         divisas_set: Set[Tuple[str, str, float]] = set()
 
-        for i in range(len(lista_muns)):
-            m1 = lista_muns[i]
-            coord1 = (m1["lat"], m1["lon"])
-            vizinhos_candidatos: List[Tuple[float, Dict[str, Any]]] = []
+        # Agrupa por UF para otimizar busca de vizinhos dentro do estado
+        muns_por_uf: Dict[str, List[Dict[str, Any]]] = {}
+        for m in lista_muns:
+            muns_por_uf.setdefault(m["uf"], []).append(m)
 
-            for j in range(len(lista_muns)):
-                if i == j:
-                    continue
-                m2 = lista_muns[j]
-                # Apenas municípios do mesmo Estado ou Estados limítrofes
-                coord2 = (m2["lat"], m2["lon"])
-                dist_km = round(geodesic(coord1, coord2).km, 2)
-
-                # Considera municípios limítrofes/adjacentes até 38km
-                if dist_km <= 38.0:
-                    vizinhos_candidatos.append((dist_km, m2))
-
-            # Conecta os vizinhos mais próximos
-            vizinhos_candidatos.sort(key=lambda x: x[0])
-            for dist_km, m2 in vizinhos_candidatos[:5]:
-                ibge_a, ibge_b = sorted([m1["codigo_ibge"], m2["codigo_ibge"]])
-                divisas_set.add((ibge_a, ibge_b, dist_km))
+        for uf, m_list in muns_por_uf.items():
+            for i in range(len(m_list)):
+                m1 = m_list[i]
+                coord1 = (m1["lat"], m1["lon"])
+                vizinhos: List[Tuple[float, Dict[str, Any]]] = []
+                for j in range(len(m_list)):
+                    if i == j:
+                        continue
+                    m2 = m_list[j]
+                    coord2 = (m2["lat"], m2["lon"])
+                    dist = round(geodesic(coord1, coord2).km, 2)
+                    if dist <= 45.0:
+                        vizinhos.append((dist, m2))
+                vizinhos.sort(key=lambda x: x[0])
+                for dist, m2 in vizinhos[:4]:
+                    ibge_a, ibge_b = sorted([m1["codigo_ibge"], m2["codigo_ibge"]])
+                    divisas_set.add((ibge_a, ibge_b, dist))
 
         batch_divisas = [
             {"ibge_origem": d[0], "ibge_destino": d[1], "distancia_km": d[2]}
             for d in divisas_set
         ]
-
         q_divisas = """
         UNWIND $batch AS item
         MATCH (m1:Municipio {codigo_ibge: item.ibge_origem})
@@ -273,31 +281,41 @@ class ReceitaGraphIngestor:
         MERGE (m1)-[r:FAZ_DIVISA_COM]->(m2)
         SET r.distancia_km = item.distancia_km
         """
-        self.executar_batch(q_divisas, batch_divisas, "Arestas FAZ_DIVISA_COM")
-        logger.info("Inseridas %d arestas de divisa territorial.", len(batch_divisas))
+        for i in range(0, len(batch_divisas), 2000):
+            self.executar_batch(q_divisas, batch_divisas[i : i + 2000], "FAZ_DIVISA_COM")
 
-    def carregar_e_inserir_cnaes(self) -> Dict[str, Dict[str, str]]:
-        """Carrega todos os CNAEs oficiais do arquivo da Receita e insere no Memgraph."""
+        logger.info("Inseridas %d arestas de divisas geodésicas.", len(batch_divisas))
+
+    def carregar_catalogo_cnaes(self) -> Dict[str, Dict[str, str]]:
+        """Carrega todos os CNAEs oficiais do arquivo da Receita (*CNAECSV*)."""
         logger.info("Carregando catálogo oficial de CNAEs da Receita Federal...")
-        cnae_files = glob.glob(os.path.join(RECEITA_DIR, "*CNAECSV*"))
+        cnae_files = list(self.dados_dir.glob("*CNAECSV*"))
         if not cnae_files:
-            raise FileNotFoundError(f"Arquivo CNAECSV não encontrado em {RECEITA_DIR}")
+            # Fallback para Cnaes.zip
+            cnae_files = list(self.dados_dir.glob("Cnaes.zip"))
+        if not cnae_files:
+            raise FileNotFoundError(f"Arquivo de CNAEs não encontrado em {self.dados_dir}")
+
+        cnae_path = str(cnae_files[0])
+        con = duckdb.connect(":memory:")
+        logger.info("Lendo arquivo de CNAEs: %s", cnae_path)
+
+        rows = con.execute(f"""
+            SELECT column0 as raw, column1 as desc
+            FROM read_csv('{cnae_path}', delim=';', header=false, encoding='latin1')
+        """).fetchall()
 
         cnae_dict: Dict[str, Dict[str, str]] = {}
-        with open(cnae_files[0], encoding="latin1") as f:
-            reader = csv.reader(f, delimiter=";")
-            for row in reader:
-                if len(row) >= 2:
-                    raw = row[0].strip()
-                    desc = row[1].strip()
-                    fmt = formatar_cnae(raw)
-                    sec = obter_secao_cnae(raw)
-                    cnae_dict[raw] = {
-                        "codigo": fmt,
-                        "codigo_raw": raw,
-                        "descricao": desc,
-                        "secao": sec,
-                    }
+        for raw, desc in rows:
+            raw_str = str(raw).strip()
+            fmt = formatar_cnae(raw_str)
+            sec = obter_secao_cnae(raw_str)
+            cnae_dict[raw_str] = {
+                "codigo": fmt,
+                "codigo_raw": raw_str,
+                "descricao": str(desc).strip(),
+                "secao": sec,
+            }
 
         batch_cnaes = list(cnae_dict.values())
         q_cnaes = """
@@ -307,206 +325,214 @@ class ReceitaGraphIngestor:
         ON MATCH SET c.codigo_raw = item.codigo_raw, c.descricao = item.descricao, c.secao = item.secao
         """
         self.executar_batch(q_cnaes, batch_cnaes, "Nós CNAE")
-        logger.info("Inseridos %d nós de CNAE no grafo.", len(batch_cnaes))
+        logger.info("Inseridos %d nós de CNAE no catálogo oficial.", len(batch_cnaes))
         return cnae_dict
 
-    def processar_e_inserir_coocorrencias_globais(self, min_freq: int = 20) -> None:
-        """
-        Extrai via DuckDB as coocorrências globais entre CNAE principal e secundário
-        de empresas ativas em todo o Brasil e insere no Memgraph em lotes.
-        """
-        logger.info(
-            "Extraindo coocorrências globais de empresas ativas (frequência >= %d)...",
-            min_freq,
-        )
-        con = duckdb.connect()
-        query = f"""
-        WITH pairs AS (
-            SELECT 
-                cnae_fiscal_principal AS cnae_a,
-                trim(unnest(string_split(cnae_fiscal_secundaria, ','))) AS cnae_b
-            FROM '{PARQUET_PATH}'
-            WHERE cnae_fiscal_secundaria IS NOT NULL 
-              AND cnae_fiscal_secundaria != ''
-              AND length(cnae_fiscal_principal) = 7
-        ),
-        canonical AS (
-            SELECT 
-                CASE WHEN cnae_a < cnae_b THEN cnae_a ELSE cnae_b END AS c1,
-                CASE WHEN cnae_a < cnae_b THEN cnae_b ELSE cnae_a END AS c2,
-                count(*) AS frequencia
-            FROM pairs
-            WHERE length(cnae_b) = 7 AND cnae_a != cnae_b
-            GROUP BY c1, c2
-            HAVING count(*) >= {min_freq}
-        )
-        SELECT c1, c2, frequencia FROM canonical ORDER BY frequencia DESC
-        """
-        df = con.execute(query).fetchall()
-        logger.info("Total de coocorrências globais extraídas: %d", len(df))
+    def _obter_padrao_estabelecimentos(self) -> str:
+        """Retorna o padrão de caminho para ler todos os arquivos de estabelecimentos."""
+        estab_files = list(self.dados_dir.glob("*ESTABELE*"))
+        if estab_files:
+            padrao = str(self.dados_dir / "*ESTABELE*")
+            logger.info("Localizados %d arquivos descompactados ESTABELE.", len(estab_files))
+            return padrao
 
-        q_merge = """
+        zips = list(self.dados_dir.glob("Estabelecimentos*.zip"))
+        if zips:
+            padrao = str(self.dados_dir / "Estabelecimentos*.zip")
+            logger.info("Localizados %d arquivos ZIP de estabelecimentos.", len(zips))
+            return padrao
+
+        raise FileNotFoundError(
+            f"Nenhum arquivo de estabelecimentos (*ESTABELE* ou Estabelecimentos*.zip) encontrado em {self.dados_dir}"
+        )
+
+    def processar_estabelecimentos_nacional(
+        self, siafi_lookup: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """
+        Lê em streaming todos os arquivos brutos de Estabelecimentos do Brasil inteiro via DuckDB
+        em memória e extrai presenças, métricas de sobrevivência, coocorrências e filiais.
+        """
+        padrao_estab = self._obter_padrao_estabelecimentos()
+        logger.info("Iniciando streaming DuckDB sobre os estabelecimentos: %s", padrao_estab)
+        con = duckdb.connect(":memory:")
+
+        # Cria uma VIEW lógica sobre os estabelecimentos brutos da Receita Federal
+        con.execute(f"""
+            CREATE VIEW view_estabelecimentos AS
+            SELECT 
+                column0  AS cnpj_basico,
+                column1  AS cnpj_ordem,
+                column3  AS matriz_filial,
+                column5  AS situacao_cadastral,
+                column6  AS data_situacao_cadastral,
+                column10 AS data_inicio_atividade,
+                column11 AS cnae_principal,
+                column12 AS cnae_secundaria,
+                column19 AS uf,
+                lpad(trim(column20), 4, '0') AS siafi_tom
+            FROM read_csv(
+                '{padrao_estab}',
+                delim=';',
+                header=false,
+                encoding='latin1',
+                types=['VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR', 'VARCHAR'],
+                ignore_errors=true
+            )
+            WHERE length(column11) = 7;
+        """)
+
+        # -------------------------------------------------------------
+        # 1. Presenças Municipais e Dinâmicas de Sobrevivência (Sebrae 5a)
+        # -------------------------------------------------------------
+        logger.info("Extraindo presenças e dinâmicas de sobrevivência para todos os municípios...")
+        df_presenca = con.execute("""
+            SELECT 
+                siafi_tom,
+                cnae_principal,
+                count(*) FILTER (WHERE situacao_cadastral = '02') AS estoque_ativas,
+                count(*) FILTER (WHERE data_inicio_atividade >= '20200101') AS abertas_5a,
+                count(*) FILTER (WHERE data_inicio_atividade >= '20200101' AND situacao_cadastral = '08') AS encerradas_5a,
+                count(*) FILTER (WHERE data_inicio_atividade >= '20240101' AND situacao_cadastral = '02') AS saldo_rec
+            FROM view_estabelecimentos
+            GROUP BY siafi_tom, cnae_principal
+            HAVING count(*) FILTER (WHERE situacao_cadastral = '02') >= 1;
+        """).fetchall()
+        logger.info("Registros de presença municipal agregados: %d", len(df_presenca))
+
+        q_presenca = """
+        UNWIND $batch AS item
+        MATCH (c:CNAE {codigo: item.cnae})
+        MATCH (m:Municipio {codigo_ibge: item.codigo_ibge})
+        MERGE (c)-[r:PRESENTE_EM]->(m)
+        SET r.quantidade_empresas_ativas = item.estoque,
+            r.estoque_ativas = item.estoque,
+            r.abertas_ultimos_5_anos = item.abertas_5a,
+            r.encerradas_ultimos_5_anos = item.encerradas_5a,
+            r.taxa_sobrevivencia_5_anos = item.taxa_sob,
+            r.saldo_recente = item.saldo_rec
+        """
+        batch: List[Dict[str, Any]] = []
+        for tom, cnae_raw, estoque, abertas_5a, encerradas_5a, saldo_rec in df_presenca:
+            if tom not in siafi_lookup:
+                continue
+            ibge = siafi_lookup[tom]["codigo_ibge"]
+            ab = int(abertas_5a or 0)
+            enc = int(encerradas_5a or 0)
+            taxa_sob = round(1.0 - (enc * 1.0 / ab), 4) if ab > 0 else 1.0
+
+            batch.append({
+                "cnae": formatar_cnae(str(cnae_raw)),
+                "codigo_ibge": ibge,
+                "estoque": int(estoque),
+                "abertas_5a": ab,
+                "encerradas_5a": enc,
+                "taxa_sob": taxa_sob,
+                "saldo_rec": int(saldo_rec or 0),
+            })
+            if len(batch) >= 5000:
+                self.executar_batch(q_presenca, batch, "PRESENTE_EM")
+                batch = []
+
+        if batch:
+            self.executar_batch(q_presenca, batch, "PRESENTE_EM")
+        logger.info("Concluída a inserção nacional de PRESENTE_EM.")
+
+        # -------------------------------------------------------------
+        # 2. Expansão Corporativa Matriz -> Filiais ([:GERA_FILIAL])
+        # -------------------------------------------------------------
+        logger.info("Extraindo relações agregadas de expansão Matriz -> Filiais...")
+        df_filiais = con.execute("""
+            WITH matrizes AS (
+                SELECT cnpj_basico, cnae_principal AS cnae_matriz
+                FROM view_estabelecimentos
+                WHERE matriz_filial = '1' AND situacao_cadastral = '02'
+            ),
+            filiais AS (
+                SELECT cnpj_basico, cnae_principal AS cnae_filial
+                FROM view_estabelecimentos
+                WHERE matriz_filial = '2' AND situacao_cadastral = '02'
+            )
+            SELECT m.cnae_matriz, f.cnae_filial, count(*) AS frequencia
+            FROM matrizes m
+            JOIN filiais f ON m.cnpj_basico = f.cnpj_basico
+            WHERE m.cnae_matriz != f.cnae_filial
+            GROUP BY m.cnae_matriz, f.cnae_filial
+            HAVING count(*) >= 20
+            ORDER BY count(*) DESC;
+        """).fetchall()
+        logger.info("Pares de expansão Matriz -> Filiais extraídos: %d", len(df_filiais))
+
+        q_filiais = """
+        UNWIND $batch AS item
+        MATCH (c1:CNAE {codigo: item.cnae_matriz})
+        MATCH (c2:CNAE {codigo: item.cnae_filial})
+        MERGE (c1)-[r:GERA_FILIAL]->(c2)
+        SET r.frequencia = item.frequencia
+        """
+        batch_filiais = [
+            {
+                "cnae_matriz": formatar_cnae(str(r[0])),
+                "cnae_filial": formatar_cnae(str(r[1])),
+                "frequencia": int(r[2]),
+            }
+            for r in df_filiais
+        ]
+        for i in range(0, len(batch_filiais), 2000):
+            self.executar_batch(q_filiais, batch_filiais[i : i + 2000], "GERA_FILIAL")
+        logger.info("Concluída a inserção nacional de GERA_FILIAL.")
+
+        # -------------------------------------------------------------
+        # 3. Coocorrências Globais Nacionais de CNAEs ([:COOCORRE_GERAL])
+        # -------------------------------------------------------------
+        logger.info("Extraindo coocorrências econômicas nacionais entre atividades...")
+        df_coocorrencias = con.execute("""
+            WITH pairs AS (
+                SELECT 
+                    cnae_principal AS cnae_a,
+                    trim(unnest(string_split(cnae_secundaria, ','))) AS cnae_b
+                FROM view_estabelecimentos
+                WHERE situacao_cadastral = '02'
+                  AND cnae_secundaria IS NOT NULL
+                  AND cnae_secundaria != ''
+            ),
+            canonical AS (
+                SELECT 
+                    CASE WHEN cnae_a < cnae_b THEN cnae_a ELSE cnae_b END AS c1,
+                    CASE WHEN cnae_a < cnae_b THEN cnae_b ELSE cnae_a END AS c2,
+                    count(*) AS frequencia
+                FROM pairs
+                WHERE length(cnae_b) = 7 AND cnae_a != cnae_b
+                GROUP BY c1, c2
+                HAVING count(*) >= 30
+            )
+            SELECT c1, c2, frequencia FROM canonical ORDER BY frequencia DESC;
+        """).fetchall()
+        logger.info("Total de coocorrências globais extraídas: %d", len(df_coocorrencias))
+
+        q_coocorre = """
         UNWIND $batch AS item
         MATCH (c1:CNAE {codigo: item.cnae_a})
         MATCH (c2:CNAE {codigo: item.cnae_b})
         MERGE (c1)-[r:COOCORRE_GERAL]->(c2)
         SET r.frequencia = item.frequencia
         """
-
-        lote_tamanho = 5000
-        batch: List[Dict[str, Any]] = []
-        inseridos = 0
-
-        for r in df:
-            batch.append({
-                "cnae_a": formatar_cnae(r[0]),
-                "cnae_b": formatar_cnae(r[1]),
+        batch_coocorre = [
+            {
+                "cnae_a": formatar_cnae(str(r[0])),
+                "cnae_b": formatar_cnae(str(r[1])),
                 "frequencia": int(r[2]),
-            })
-            if len(batch) >= lote_tamanho:
-                self.executar_batch(q_merge, batch, "COOCORRE_GERAL")
-                inseridos += len(batch)
-                batch = []
-
-        if batch:
-            self.executar_batch(q_merge, batch, "COOCORRE_GERAL")
-            inseridos += len(batch)
-
-        logger.info("Concluída a inserção de %d arestas COOCORRE_GERAL.", inseridos)
-
-    def processar_e_inserir_coocorrencias_locais(
-        self,
-        municipios_map: Dict[Tuple[str, str], Dict[str, Any]],
-        min_freq: int = 15,
-    ) -> None:
-        """
-        Extrai via DuckDB as coocorrências municipais entre CNAEs de empresas ativas
-        e insere (:CNAE)-[:COOCORRE_EM {frequencia, codigo_ibge_municipio}]-(:CNAE).
-        """
-        logger.info(
-            "Extraindo coocorrências municipais de empresas ativas (frequência >= %d)...",
-            min_freq,
-        )
-        con = duckdb.connect()
-        query = f"""
-        WITH pairs AS (
-            SELECT 
-                municipio,
-                uf,
-                cnae_fiscal_principal AS cnae_a,
-                trim(unnest(string_split(cnae_fiscal_secundaria, ','))) AS cnae_b
-            FROM '{PARQUET_PATH}'
-            WHERE cnae_fiscal_secundaria IS NOT NULL 
-              AND cnae_fiscal_secundaria != ''
-              AND length(cnae_fiscal_principal) = 7
-        ),
-        canonical AS (
-            SELECT 
-                municipio,
-                uf,
-                CASE WHEN cnae_a < cnae_b THEN cnae_a ELSE cnae_b END AS c1,
-                CASE WHEN cnae_a < cnae_b THEN cnae_b ELSE cnae_a END AS c2,
-                count(*) AS frequencia
-            FROM pairs
-            WHERE length(cnae_b) = 7 AND cnae_a != cnae_b
-            GROUP BY municipio, uf, c1, c2
-            HAVING count(*) >= {min_freq}
-        )
-        SELECT municipio, uf, c1, c2, frequencia FROM canonical ORDER BY frequencia DESC
-        """
-        df = con.execute(query).fetchall()
-        logger.info("Total de coocorrências municipais extraídas: %d", len(df))
-
-        q_merge = """
-        UNWIND $batch AS item
-        MATCH (c1:CNAE {codigo: item.cnae_a})
-        MATCH (c2:CNAE {codigo: item.cnae_b})
-        MERGE (c1)-[r:COOCORRE_EM {codigo_ibge_municipio: item.codigo_ibge}]->(c2)
-        SET r.frequencia = item.frequencia
-        """
-
-        lote_tamanho = 5000
-        batch: List[Dict[str, Any]] = []
-        inseridos = 0
-
-        for mun, uf, c1, c2, freq in df:
-            norm_key = (normalizar_texto(mun), uf.strip().upper())
-            if norm_key not in municipios_map:
-                continue
-            ibge = municipios_map[norm_key]["codigo_ibge"]
-            batch.append({
-                "cnae_a": formatar_cnae(c1),
-                "cnae_b": formatar_cnae(c2),
-                "codigo_ibge": ibge,
-                "frequencia": int(freq),
-            })
-            if len(batch) >= lote_tamanho:
-                self.executar_batch(q_merge, batch, "COOCORRE_EM")
-                inseridos += len(batch)
-                batch = []
-
-        if batch:
-            self.executar_batch(q_merge, batch, "COOCORRE_EM")
-            inseridos += len(batch)
-
-        logger.info("Concluída a inserção de %d arestas COOCORRE_EM.", inseridos)
-
-    def processar_e_inserir_presencas(
-        self, municipios_map: Dict[Tuple[str, str], Dict[str, Any]]
-    ) -> None:
-        """
-        Extrai contagem de empresas ativas de cada CNAE por município
-        e cria (:CNAE)-[:PRESENTE_EM {quantidade_empresas_ativas}]->(:Municipio).
-        """
-        logger.info("Extraindo presenças de empresas ativas por município...")
-        con = duckdb.connect()
-        query = f"""
-        SELECT municipio, uf, cnae_fiscal_principal, count(*) AS total
-        FROM '{PARQUET_PATH}'
-        WHERE length(cnae_fiscal_principal) = 7
-        GROUP BY municipio, uf, cnae_fiscal_principal
-        HAVING count(*) >= 1
-        """
-        df = con.execute(query).fetchall()
-        logger.info("Total de registros de presença extraídos: %d", len(df))
-
-        q_merge = """
-        UNWIND $batch AS item
-        MATCH (c:CNAE {codigo: item.codigo_cnae})
-        MATCH (m:Municipio {codigo_ibge: item.codigo_ibge})
-        MERGE (c)-[r:PRESENTE_EM]->(m)
-        SET r.quantidade_empresas_ativas = item.quantidade
-        """
-
-        lote_tamanho = 5000
-        batch: List[Dict[str, Any]] = []
-        inseridos = 0
-
-        for mun, uf, cnae_raw, total in df:
-            norm_key = (normalizar_texto(mun), uf.strip().upper())
-            if norm_key not in municipios_map:
-                continue
-            ibge = municipios_map[norm_key]["codigo_ibge"]
-            batch.append({
-                "codigo_cnae": formatar_cnae(cnae_raw),
-                "codigo_ibge": ibge,
-                "quantidade": int(total),
-            })
-            if len(batch) >= lote_tamanho:
-                self.executar_batch(q_merge, batch, "PRESENTE_EM")
-                inseridos += len(batch)
-                batch = []
-
-        if batch:
-            self.executar_batch(q_merge, batch, "PRESENTE_EM")
-            inseridos += len(batch)
-
-        logger.info("Concluída a inserção de %d arestas PRESENTE_EM.", inseridos)
+            }
+            for r in df_coocorrencias
+        ]
+        for i in range(0, len(batch_coocorre), 5000):
+            self.executar_batch(q_coocorre, batch_coocorre[i : i + 5000], "COOCORRE_GERAL")
+        logger.info("Concluída a inserção nacional de COOCORRE_GERAL.")
 
 
 def main() -> None:
     t0 = time.time()
-    logger.info("=== INICIANDO PIPELINE DE CARGA REAL DA RECEITA FEDERAL ===")
+    logger.info("=== INICIANDO PIPELINE DE GRAPHRAG NACIONAL DA RECEITA FEDERAL ===")
     ingestor = ReceitaGraphIngestor(
         uri=MEMGRAPH_URI,
         user=MEMGRAPH_USER,
@@ -518,16 +544,14 @@ def main() -> None:
         ingestor.criar_constraints()
         ingestor.limpar_banco()
 
-        municipios_map = ingestor.processar_e_inserir_estados_e_municipios()
-        ingestor.calcular_e_inserir_divisas(municipios_map)
-        ingestor.carregar_e_inserir_cnaes()
-        ingestor.processar_e_inserir_coocorrencias_globais(min_freq=20)
-        ingestor.processar_e_inserir_coocorrencias_locais(municipios_map, min_freq=15)
-        ingestor.processar_e_inserir_presencas(municipios_map)
+        siafi_lookup = ingestor.processar_e_inserir_brasil_inteiro()
+        ingestor.calcular_divisas_geograficas(siafi_lookup)
+        ingestor.carregar_catalogo_cnaes()
+        ingestor.processar_estabelecimentos_nacional(siafi_lookup)
 
         t_total = time.time() - t0
         logger.info(
-            "=== PIPELINE CONCLUÍDO COM SUCESSO EM %.2f SEGUNDOS ===", t_total
+            "=== PIPELINE NACIONAL CONCLUÍDO COM SUCESSO EM %.2f SEGUNDOS ===", t_total
         )
     finally:
         ingestor.close()

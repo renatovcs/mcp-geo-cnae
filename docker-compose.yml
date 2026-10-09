@@ -5,7 +5,7 @@ services:
     ports:
       - "7687:7687"
     environment:
-      - MEMGRAPH="--telemetry-enabled=false"
+      - MEMGRAPH="--telemetry-enabled=false --memory-limit=0"
     volumes:
       - memgraph_data:/var/lib/memgraph
     restart: unless-stopped
@@ -21,6 +21,40 @@ services:
     depends_on:
       - memgraph
     restart: unless-stopped
+
+  # Servidor MCP para integração com LLMs / Agentes
+  geo-cnae-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-geo-cnae-server
+    environment:
+      - MEMGRAPH_URI=bolt://memgraph:7687
+      - MEMGRAPH_USER=
+      - MEMGRAPH_PASSWORD=
+    depends_on:
+      - memgraph
+    restart: unless-stopped
+
+  # Worker de Ingestão: processa a pasta /dados_receita da Receita Federal para o Memgraph
+  # Uso: docker compose run --rm geo-cnae-ingestor
+  geo-cnae-ingestor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-geo-cnae-ingestor
+    command: ["python", "ingestao_receita.py"]
+    environment:
+      - MEMGRAPH_URI=bolt://memgraph:7687
+      - MEMGRAPH_USER=
+      - MEMGRAPH_PASSWORD=
+      - DADOS_RECEITA_DIR=/dados_receita
+    volumes:
+      - ${DADOS_RECEITA_DIR:-/home/ubuntu/dados_receita}:/dados_receita:ro
+    depends_on:
+      - memgraph
+    profiles:
+      - ingestao
 
 volumes:
   memgraph_data:

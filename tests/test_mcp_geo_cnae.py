@@ -1,15 +1,14 @@
-"""
-Testes automatizados para validação do servidor MCP e consultas GraphRAG com dados reais da Receita Federal.
-"""
-
 import unittest
 from typing import Any, Dict, List
 
 from server import (
     buscar_coocorrencia_cnaes_global,
     buscar_coocorrencia_cnaes_municipio,
+    buscar_dinamica_sobrevivencia_cnae,
+    buscar_expansao_filiais_cnae,
     buscar_malha_municipal_vizinha,
     buscar_perfil_economico_municipio,
+    buscar_visao_macro_regiao,
 )
 
 
@@ -45,13 +44,14 @@ class TestMCPGeoCNAEReal(unittest.TestCase):
         self.assertEqual(frequencias, sorted(frequencias, reverse=True))
 
     def test_buscar_malha_municipal_curitiba(self) -> None:
-        # Busca por nome do município de forma flexível
+        # Busca por nome do município de forma flexível e valida hierarquia regional
         resultado: Dict[str, Any] = buscar_malha_municipal_vizinha("Curitiba")
 
         self.assertTrue(resultado["encontrado"])
         self.assertEqual(resultado["codigo_ibge"], "4106902")
         self.assertEqual(resultado["nome"], "Curitiba")
         self.assertEqual(resultado["estado"]["uf"], "PR")
+        self.assertEqual(resultado["estado"]["regiao"], "Sul")
 
         vizinhos = resultado["municipios_vizinhos"]
         self.assertGreater(len(vizinhos), 0)
@@ -65,12 +65,54 @@ class TestMCPGeoCNAEReal(unittest.TestCase):
         for v in vizinhos:
             self.assertGreater(v["distancia_km"], 0.0)
 
-    def test_buscar_perfil_economico_municipio(self) -> None:
+    def test_buscar_perfil_economico_municipio_com_sobrevivencia(self) -> None:
         resultado: Dict[str, Any] = buscar_perfil_economico_municipio("3550308", top_cnaes=5)
         self.assertTrue(resultado["encontrado"])
         self.assertEqual(resultado["nome"], "São Paulo")
+        self.assertEqual(resultado["regiao"], "Sudeste")
         self.assertGreater(resultado["total_empresas_ativas_mapeadas"], 1000000)
         self.assertEqual(len(resultado["principais_cnaes"]), 5)
+
+        # Valida que as métricas de sobrevivência e dinamismo foram computadas
+        primeiro_cnae = resultado["principais_cnaes"][0]
+        self.assertIn("taxa_sobrevivencia_5_anos", primeiro_cnae)
+        self.assertIn("taxa_sobrevivencia_percentual", primeiro_cnae)
+        self.assertGreaterEqual(primeiro_cnae["taxa_sobrevivencia_5_anos"], 0.0)
+
+    def test_buscar_dinamica_sobrevivencia_cnae(self) -> None:
+        resultado: Dict[str, Any] = buscar_dinamica_sobrevivencia_cnae(
+            codigo_cnae="6201-5/01", codigo_ibge="3550308"
+        )
+        self.assertTrue(resultado["encontrado"])
+        self.assertEqual(resultado["municipio"]["nome"], "São Paulo")
+        self.assertEqual(resultado["municipio"]["regiao"], "Sudeste")
+        self.assertEqual(resultado["cnae"]["codigo"], "6201-5/01")
+
+        indicadores = resultado["indicadores_mercado"]
+        self.assertGreater(indicadores["estoque_empresas_ativas"], 1000)
+        self.assertGreater(indicadores["taxa_sobrevivencia_5_anos"], 0.0)
+        self.assertIn("diagnostico_setorial", indicadores)
+
+    def test_buscar_expansao_filiais_cnae(self) -> None:
+        # Software desenvolvendo filiais de consultoria/customização
+        resultado: List[Dict[str, Any]] = buscar_expansao_filiais_cnae("6201-5/01", limite=5)
+        self.assertIsInstance(resultado, list)
+        self.assertGreater(len(resultado), 0)
+
+        # Valida ordenação por frequência de filiais geradas
+        freqs = [item["frequencia_filiais"] for item in resultado]
+        self.assertEqual(freqs, sorted(freqs, reverse=True))
+
+    def test_buscar_visao_macro_regiao_sul(self) -> None:
+        resultado: Dict[str, Any] = buscar_visao_macro_regiao("Sul")
+        self.assertTrue(resultado["encontrado"])
+        self.assertEqual(resultado["regiao"], "Sul")
+        self.assertEqual(resultado["total_estados"], 3)  # PR, SC, RS
+
+        ufs = [e["uf"] for e in resultado["estados"]]
+        self.assertIn("PR", ufs)
+        self.assertIn("SC", ufs)
+        self.assertIn("RS", ufs)
 
     def test_municipio_inexistente(self) -> None:
         ibge_fantasma = "9999999"
