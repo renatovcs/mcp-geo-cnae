@@ -74,35 +74,35 @@ jobs:
 
       - name: Executar Deploy e Otimizacao Docker
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ steps.target.outputs.user }}@${{ steps.target.outputs.host }} bash -c "'
+          ssh -o StrictHostKeyChecking=no ${{ steps.target.outputs.user }}@${{ steps.target.outputs.host }} "bash -s" << 'EOF'
             set -euo pipefail
             cd /home/ubuntu/mcp-geo-cnae
 
-            echo \"==> 1. Puxando imagens Docker otimizadas...\"
+            echo "==> 1. Puxando imagens Docker otimizadas..."
             docker compose pull memgraph memgraph-lab
 
-            echo \"==> 2. Atualizando containers Memgraph e Memgraph Lab...\"
+            echo "==> 2. Atualizando containers Memgraph e Memgraph Lab..."
             docker stop memgraph-mage 2>/dev/null || true
             docker rm memgraph-mage 2>/dev/null || true
             docker compose up -d memgraph memgraph-lab
 
-            echo \"==> 3. Aguardando Memgraph inicializar na porta 7687...\"
-            for i in {1..30}; do
+            echo "==> 3. Aguardando Memgraph inicializar na porta 7687..."
+            for i in $(seq 1 30); do
               if nc -z 127.0.0.1 7687 2>/dev/null; then
-                echo \"Memgraph ativo e respondendo na porta 7687!\"
+                echo "Memgraph ativo e respondendo na porta 7687!"
                 break
               fi
               sleep 1
             done
 
-            echo \"==> 4. Validando integridade do banco no Memgraph...\"
-            echo \"MATCH (m:Municipio) RETURN count(m) AS total_municipios;\" | docker exec -i memgraph mgconsole
+            echo "==> 4. Validando integridade do banco no Memgraph..."
+            echo "MATCH (m:Municipio) RETURN count(m) AS total_municipios;" | docker exec -i memgraph mgconsole
 
-            echo \"==> 5. Limpeza de imagens antigas/inativas e liberacao de espaco em disco...\"
+            echo "==> 5. Limpeza de imagens antigas/inativas e liberacao de espaco em disco..."
             docker image rm memgraph/memgraph-mage:latest 2>/dev/null || true
             docker image prune -f
-            docker builder prune -f --filter \"until=24h\" || true
+            docker builder prune -f --filter "until=24h" || true
 
-            echo \"==> 6. Status final dos servicos:\"
+            echo "==> 6. Status final dos servicos:"
             docker compose ps
-          '"
+          EOF
