@@ -1,7 +1,7 @@
 services:
   memgraph:
-    image: memgraph/memgraph-mage:latest
-    container_name: memgraph-mage
+    image: memgraph/memgraph:latest
+    container_name: memgraph
     ports:
       - "7687:7687"
     environment:

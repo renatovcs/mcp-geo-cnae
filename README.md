@@ -1,6 +1,6 @@
 # MCP Geo-CNAE: Arquitetura GraphRAG Unificada
 
-Servidor MCP (**Model Context Protocol**) em Python integrado ao banco de dados em grafos **Memgraph** (MAGE), projetado para análises de inteligência de mercado cruzando relações de coocorrência de **CNAEs de empresas ativas na Receita Federal** com a **topologia geográfica de municípios, estados e macrorregiões brasileiras**, além de dinâmicas de sobrevivência empresarial e expansão corporativa matriz-filiais.
+Servidor MCP (**Model Context Protocol**) em Python integrado ao banco de dados em grafos **Memgraph**, projetado para análises de inteligência de mercado cruzando relações de coocorrência de **CNAEs de empresas ativas na Receita Federal** com a **topologia geográfica de municípios, estados e macrorregiões brasileiras**, além de dinâmicas de sobrevivência empresarial e expansão corporativa matriz-filiais.
 
 ---
 
@@ -89,7 +89,7 @@ ssh ubuntu@141.148.38.30
 cd ~/mcp-geo-cnae
 ```
 
-### 2. Iniciar o Memgraph MAGE e Memgraph Lab
+### 2. Iniciar o Memgraph e Memgraph Lab
 
 ```bash
 docker compose up -d memgraph memgraph-lab

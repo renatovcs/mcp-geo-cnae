@@ -1,0 +1,108 @@
+name: CI/CD Pipeline - Deploy to Oracle VM
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate Code & Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate Python Syntax & Bytecode Compilation
+        run: |
+          python -m py_compile server.py ingestao.py ingestao_receita.py ingestao_coocorrencias.py ingestao_filiais.py
+
+  deploy:
+    name: Deploy & Optimize Docker on Oracle VM
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configurar SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY || secrets.SSH_KEY || secrets.SERVER_SSH_KEY }}
+
+      - name: Definir Variaveis de Destino e Known Hosts
+        id: target
+        run: |
+          mkdir -p ~/.ssh
+          HOST="${{ secrets.SSH_HOST }}"
+          if [ -z "$HOST" ]; then
+            HOST="141.148.38.30"
+          fi
+          USER="${{ secrets.SSH_USERNAME }}"
+          if [ -z "$USER" ]; then
+            USER="ubuntu"
+          fi
+          echo "host=$HOST" >> $GITHUB_OUTPUT
+          echo "user=$USER" >> $GITHUB_OUTPUT
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+      - name: Sincronizar Arquivos via Rsync
+        run: |
+          rsync -avz -e "ssh -o StrictHostKeyChecking=no" \
+            --exclude '.git' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude '.venv' \
+            --exclude '.env' \
+            ./ ${{ steps.target.outputs.user }}@${{ steps.target.outputs.host }}:/home/ubuntu/mcp-geo-cnae/
+
+      - name: Executar Deploy e Otimizacao Docker
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ steps.target.outputs.user }}@${{ steps.target.outputs.host }} bash -c "'
+            set -euo pipefail
+            cd /home/ubuntu/mcp-geo-cnae
+
+            echo \"==> 1. Puxando imagens Docker otimizadas...\"
+            docker compose pull memgraph memgraph-lab
+
+            echo \"==> 2. Atualizando containers Memgraph e Memgraph Lab...\"
+            docker stop memgraph-mage 2>/dev/null || true
+            docker rm memgraph-mage 2>/dev/null || true
+            docker compose up -d memgraph memgraph-lab
+
+            echo \"==> 3. Aguardando Memgraph inicializar na porta 7687...\"
+            for i in {1..30}; do
+              if nc -z 127.0.0.1 7687 2>/dev/null; then
+                echo \"Memgraph ativo e respondendo na porta 7687!\"
+                break
+              fi
+              sleep 1
+            done
+
+            echo \"==> 4. Validando integridade do banco no Memgraph...\"
+            echo \"MATCH (m:Municipio) RETURN count(m) AS total_municipios;\" | docker exec -i memgraph mgconsole
+
+            echo \"==> 5. Limpeza de imagens antigas/inativas e liberacao de espaco em disco...\"
+            docker image rm memgraph/memgraph-mage:latest 2>/dev/null || true
+            docker image prune -f
+            docker builder prune -f --filter \"until=24h\" || true
+
+            echo \"==> 6. Status final dos servicos:\"
+            docker compose ps
+          '"
