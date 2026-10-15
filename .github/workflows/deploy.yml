@@ -31,7 +31,7 @@ jobs:
 
       - name: Validate Python Syntax & Bytecode Compilation
         run: |
-          python -m py_compile server.py ingestao.py ingestao_receita.py ingestao_coocorrencias.py ingestao_filiais.py
+          python -m py_compile server.py ingestao.py ingestao_receita.py ingestao_coocorrencias.py ingestao_filiais.py ingestao_simples.py
 
   deploy:
     name: Deploy & Optimize Docker on Oracle VM

@@ -387,16 +387,33 @@ class ReceitaGraphIngestor:
             f"Nenhum arquivo de estabelecimentos (*ESTABELE* ou Estabelecimentos*.zip) encontrado em {self.dados_dir}"
         )
 
+    def _obter_caminho_simples(self) -> Optional[str]:
+        """Localiza o arquivo do Simples Nacional/MEI, se disponível."""
+        simples_files = list(self.dados_dir.glob("*SIMPLES*"))
+        if simples_files:
+            logger.info("Arquivo de Simples Nacional localizado: %s", simples_files[0])
+            return str(simples_files[0])
+        zips = list(self.dados_dir.glob("*Simples*.zip"))
+        if zips:
+            logger.info("Arquivo ZIP de Simples Nacional localizado: %s", zips[0])
+            return str(zips[0])
+        logger.info("Nenhum arquivo de Simples/MEI encontrado em %s. Prosseguindo sem métricas de regime.", self.dados_dir)
+        return None
+
     def processar_estabelecimentos_nacional(
         self, siafi_lookup: Dict[str, Dict[str, Any]]
     ) -> None:
         """
         Lê em streaming todos os arquivos brutos de Estabelecimentos do Brasil inteiro via DuckDB
         em memória e extrai presenças, métricas de sobrevivência, coocorrências e filiais.
+        Cruza automaticamente com Simples Nacional e MEI quando o arquivo estiver presente.
         """
         padrao_estab = self._obter_padrao_estabelecimentos()
+        caminho_simples = self._obter_caminho_simples()
         logger.info("Iniciando streaming DuckDB sobre os estabelecimentos: %s", padrao_estab)
         con = duckdb.connect(":memory:")
+        con.execute("PRAGMA max_memory='12GB';")
+        con.execute("PRAGMA threads=4;")
 
         # Cria uma VIEW lógica sobre os estabelecimentos brutos da Receita Federal
         con.execute(f"""
@@ -424,21 +441,60 @@ class ReceitaGraphIngestor:
         """)
 
         # -------------------------------------------------------------
-        # 1. Presenças Municipais e Dinâmicas de Sobrevivência (Sebrae 5a)
+        # 1. Presenças Municipais e Dinâmicas de Sobrevivência (Sebrae 5a + Simples/MEI)
         # -------------------------------------------------------------
         logger.info("Extraindo presenças e dinâmicas de sobrevivência para todos os municípios...")
-        df_presenca = con.execute("""
-            SELECT 
-                siafi_tom,
-                cnae_principal,
-                count(*) FILTER (WHERE situacao_cadastral = '02') AS estoque_ativas,
-                count(*) FILTER (WHERE data_inicio_atividade >= '20200101') AS abertas_5a,
-                count(*) FILTER (WHERE data_inicio_atividade >= '20200101' AND situacao_cadastral = '08') AS encerradas_5a,
-                count(*) FILTER (WHERE data_inicio_atividade >= '20240101' AND situacao_cadastral = '02') AS saldo_rec
-            FROM view_estabelecimentos
-            GROUP BY siafi_tom, cnae_principal
-            HAVING count(*) FILTER (WHERE situacao_cadastral = '02') >= 1;
-        """).fetchall()
+        if caminho_simples:
+            logger.info("Carregando tabela em memória de empresas ativas no Simples e MEI...")
+            con.execute(f"""
+                CREATE TABLE simples_ativos AS
+                SELECT 
+                    column0 AS cnpj_basico,
+                    (column1 = 'S' AND (column3 = '00000000' OR column3 > '20261015')) AS is_simples,
+                    (column4 = 'S' AND (column6 = '00000000' OR column6 > '20261015')) AS is_mei
+                FROM read_csv(
+                    '{caminho_simples}',
+                    delim=';',
+                    header=false,
+                    all_varchar=true,
+                    ignore_errors=true
+                )
+                WHERE (column1 = 'S' AND (column3 = '00000000' OR column3 > '20261015'))
+                   OR (column4 = 'S' AND (column6 = '00000000' OR column6 > '20261015'));
+            """)
+            logger.info("Tabela de Simples/MEI carregada. Agregando com estabelecimentos...")
+            df_presenca = con.execute("""
+                SELECT 
+                    e.siafi_tom,
+                    e.cnae_principal,
+                    count(*) FILTER (WHERE e.situacao_cadastral = '02') AS estoque_ativas,
+                    count(*) FILTER (WHERE e.situacao_cadastral = '02' AND s.is_simples) AS estoque_simples,
+                    count(*) FILTER (WHERE e.situacao_cadastral = '02' AND s.is_mei) AS estoque_mei,
+                    count(*) FILTER (WHERE e.data_inicio_atividade >= '20200101') AS abertas_5a,
+                    count(*) FILTER (WHERE e.data_inicio_atividade >= '20200101' AND e.situacao_cadastral = '08') AS encerradas_5a,
+                    count(*) FILTER (WHERE e.data_inicio_atividade >= '20240101' AND e.situacao_cadastral = '02') AS saldo_rec
+                FROM view_estabelecimentos e
+                LEFT JOIN simples_ativos s ON e.cnpj_basico = s.cnpj_basico
+                GROUP BY e.siafi_tom, e.cnae_principal
+                HAVING count(*) FILTER (WHERE e.situacao_cadastral = '02') >= 1;
+            """).fetchall()
+        else:
+            df_presenca_raw = con.execute("""
+                SELECT 
+                    siafi_tom,
+                    cnae_principal,
+                    count(*) FILTER (WHERE situacao_cadastral = '02') AS estoque_ativas,
+                    0 AS estoque_simples,
+                    0 AS estoque_mei,
+                    count(*) FILTER (WHERE data_inicio_atividade >= '20200101') AS abertas_5a,
+                    count(*) FILTER (WHERE data_inicio_atividade >= '20200101' AND situacao_cadastral = '08') AS encerradas_5a,
+                    count(*) FILTER (WHERE data_inicio_atividade >= '20240101' AND situacao_cadastral = '02') AS saldo_rec
+                FROM view_estabelecimentos
+                GROUP BY siafi_tom, cnae_principal
+                HAVING count(*) FILTER (WHERE situacao_cadastral = '02') >= 1;
+            """).fetchall()
+            df_presenca = df_presenca_raw
+
         logger.info("Registros de presença municipal agregados: %d", len(df_presenca))
 
         q_presenca = """
@@ -448,24 +504,34 @@ class ReceitaGraphIngestor:
         MERGE (c)-[r:PRESENTE_EM]->(m)
         SET r.quantidade_empresas_ativas = item.estoque,
             r.estoque_ativas = item.estoque,
+            r.estoque_mei = item.estoque_mei,
+            r.estoque_simples = item.estoque_simples,
+            r.taxa_mei = item.taxa_mei,
             r.abertas_ultimos_5_anos = item.abertas_5a,
             r.encerradas_ultimos_5_anos = item.encerradas_5a,
             r.taxa_sobrevivencia_5_anos = item.taxa_sob,
             r.saldo_recente = item.saldo_rec
         """
         batch: List[Dict[str, Any]] = []
-        for tom, cnae_raw, estoque, abertas_5a, encerradas_5a, saldo_rec in df_presenca:
+        for tom, cnae_raw, estoque, est_simples, est_mei, abertas_5a, encerradas_5a, saldo_rec in df_presenca:
             if tom not in siafi_lookup:
                 continue
             ibge = siafi_lookup[tom]["codigo_ibge"]
             ab = int(abertas_5a or 0)
             enc = int(encerradas_5a or 0)
             taxa_sob = round(1.0 - (enc * 1.0 / ab), 4) if ab > 0 else 1.0
+            tot_est = int(estoque)
+            mei_cnt = int(est_mei or 0)
+            simples_cnt = int(est_simples or 0)
+            taxa_m = round(mei_cnt * 1.0 / tot_est, 4) if tot_est > 0 else 0.0
 
             batch.append({
                 "cnae": formatar_cnae(str(cnae_raw)),
                 "codigo_ibge": ibge,
-                "estoque": int(estoque),
+                "estoque": tot_est,
+                "estoque_mei": mei_cnt,
+                "estoque_simples": simples_cnt,
+                "taxa_mei": taxa_m,
                 "abertas_5a": ab,
                 "encerradas_5a": enc,
                 "taxa_sob": taxa_sob,
@@ -477,7 +543,7 @@ class ReceitaGraphIngestor:
 
         if batch:
             self.executar_batch(q_presenca, batch, "PRESENTE_EM")
-        logger.info("Concluída a inserção nacional de PRESENTE_EM.")
+        logger.info("Concluída a inserção nacional de PRESENTE_EM com métricas de Simples/MEI.")
 
         # -------------------------------------------------------------
         # 2. Expansão Corporativa Matriz -> Filiais ([:GERA_FILIAL])

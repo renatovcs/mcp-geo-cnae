@@ -2,6 +2,8 @@
 
 Servidor MCP (**Model Context Protocol**) em Python integrado ao banco de dados em grafos **Memgraph**, projetado para análises de inteligência de mercado cruzando relações de coocorrência de **CNAEs de empresas ativas na Receita Federal** com a **topologia geográfica de municípios, estados e macrorregiões brasileiras**, além de dinâmicas de sobrevivência empresarial e expansão corporativa matriz-filiais.
 
+> 💡 **Novo**: Veja o [Guia Prático de Perguntas e Casos de Uso](PERGUNTAS_E_CASOS_DE_USO.md) com dezenas de exemplos de perguntas estratégicas de inteligência de mercado prontas para fazer ao assistente.
+
 ---
 
 ## 🏗️ Arquitetura do Grafo (GraphRAG)
@@ -21,7 +23,7 @@ O grafo conecta atividades econômicas, dinâmicas temporais de mercado e topolo
   - `(:CNAE)-[:COOCORRE_GERAL {frequencia}]-(:CNAE)`: Coocorrências entre atividade principal e secundárias de empresas ativas em escala nacional.
   - `(:CNAE)-[:COOCORRE_EM {frequencia, codigo_ibge_municipio}]-(:CNAE)`: Coocorrência cruzada restrita ao município.
   - `(:CNAE)-[:GERA_FILIAL {frequencia}]->(:CNAE)`: Relação agregada entre a atividade principal da Matriz e as atividades abertas como Filiais (padrões corporativos de desdobramento e verticalização).
-  - `(:CNAE)-[:PRESENTE_EM {estoque_ativas, abertas_ultimos_5_anos, encerradas_ultimos_5_anos, taxa_sobrevivencia_5_anos, saldo_recente}]->(:Municipio)`: Densidade territorial e indicadores de dinamismo e sobrevivência setorial.
+  - `(:CNAE)-[:PRESENTE_EM {estoque_ativas, estoque_mei, estoque_simples, taxa_mei, abertas_ultimos_5_anos, encerradas_ultimos_5_anos, taxa_sobrevivencia_5_anos, saldo_recente}]->(:Municipio)`: Densidade territorial, porte predominante (MEI vs Simples vs Geral) e indicadores de dinamismo e sobrevivência setorial.
 
 ---
 
@@ -38,7 +40,7 @@ dados_receita/
 ├── F.K03200$Z.D60912.CNAECSV                             (Catálogo de CNAEs)
 ├── F.K03200$Z.D60912.NATJUCSV                            (Naturezas Jurídicas)
 ├── F.K03200$Z.D60912.MOTICSV                             (Motivos de Situação)
-└── F.K03200$W.SIMPLES.CSV.D60912                         (Opção pelo Simples)
+└── F.K03200$W.SIMPLES.CSV.D60912                         (Opção pelo Simples e MEI)
 ```
 
 ### Mapeamento Preciso SIAFI/TOM -> IBGE:
@@ -54,6 +56,7 @@ Isso elimina qualquer ambiguidade de homônimos ou divergências de acentuação
 
 | Tópico Analisado | Decisão Técnica | Justificativa e Padrão da Indústria |
 |---|---|---|
+| **Regime Tributário (Simples & MEI)** | **Propriedades na aresta `[:PRESENTE_EM]` (`estoque_mei`, `estoque_simples`, `taxa_mei`)** | Evita o antipattern de *Supernodes* ou explosão de 50M de nós de CNPJ. Permite filtragem precisa para soluções B2B e cálculo de mercado endereçável (TAM) separando autônomos (MEI) de empresas estruturadas com overhead zero de travessia. |
 | **Linha Temporal no Grafo** | **Propriedades na aresta (Sem nós de meses/anos)** | Evita o antipattern clássico de *Supernodes* (nós densos com centenas de milhares de conexões que travam traversals e estouram tokens no GraphRAG). Agregações numéricas temporais são preservadas como propriedades. |
 | **Sentido da Aresta para Ativa/Inativa** | **Rejeitado (Antipattern)** | Inverter a direção da aresta para denotar encerramento quebra queries Cypher direcionadas e induz alucinações em LLMs. A semântica é expressa por propriedades (`estoque_ativas`, `encerradas_ultimos_5_anos`) ou arestas tipadas. |
 | **Cálculo da Taxa de Mortalidade** | **Safra de 5 anos (Metodologia Sebrae/IBGE)** | Comparar empresas encerradas de 30 anos atrás com ativas hoje gera viés de sobrevivência severo. Adotou-se a taxa de sobrevivência em ciclo crítico de 5 anos ($1 - \frac{\text{baixadas 5a}}{\text{abertas 5a}}$) e saldo anual recente. |

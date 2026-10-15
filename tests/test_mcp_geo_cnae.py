@@ -76,10 +76,13 @@ class TestMCPGeoCNAEReal(unittest.TestCase):
         self.assertGreater(resultado["total_empresas_ativas_mapeadas"], 1000000)
         self.assertEqual(len(resultado["principais_cnaes"]), 5)
 
-        # Valida que as métricas de sobrevivência e dinamismo foram computadas
+        # Valida que as métricas de sobrevivência, dinamismo e regimes (MEI/Simples) foram computadas
         primeiro_cnae = resultado["principais_cnaes"][0]
         self.assertIn("taxa_sobrevivencia_5_anos", primeiro_cnae)
         self.assertIn("taxa_sobrevivencia_percentual", primeiro_cnae)
+        self.assertIn("estoque_mei", primeiro_cnae)
+        self.assertIn("estoque_simples", primeiro_cnae)
+        self.assertIn("taxa_mei", primeiro_cnae)
         self.assertGreaterEqual(primeiro_cnae["taxa_sobrevivencia_5_anos"], 0.0)
 
     def test_buscar_dinamica_sobrevivencia_cnae(self) -> None:
@@ -95,6 +98,10 @@ class TestMCPGeoCNAEReal(unittest.TestCase):
         self.assertGreater(indicadores["estoque_empresas_ativas"], 1000)
         self.assertGreater(indicadores["taxa_sobrevivencia_5_anos"], 0.0)
         self.assertIn("diagnostico_setorial", indicadores)
+        self.assertIn("estoque_mei", indicadores)
+        self.assertIn("estoque_simples", indicadores)
+        self.assertIn("taxa_mei", indicadores)
+        self.assertIn("perfil_predominante_porte", indicadores)
 
     def test_buscar_expansao_filiais_cnae(self) -> None:
         # Software desenvolvendo filiais de consultoria/customização

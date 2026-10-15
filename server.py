@@ -177,10 +177,10 @@ def buscar_coocorrencia_cnaes_municipio(
     query = """
     MATCH (m:Municipio)
     WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
-    WITH m.codigo_ibge AS ibge_real
+    WITH m.codigo_ibge AS ibge_real, m
     MATCH (c1:CNAE)
     WHERE c1.codigo = $fmt OR c1.codigo_raw = $raw
-    MATCH (c1)-[r:COOCORRE_EM {codigo_ibge_municipio: ibge_real}]-(c2:CNAE)
+    OPTIONAL MATCH (c1)-[r:COOCORRE_EM {codigo_ibge_municipio: ibge_real}]-(c2:CNAE)
     RETURN c2.codigo AS codigo,
            c2.descricao AS descricao,
            c2.secao AS secao,
@@ -201,8 +201,40 @@ def buscar_coocorrencia_cnaes_municipio(
                     "codigo_ibge": record["codigo_ibge"],
                 }
                 for record in result
+                if record["codigo"] is not None and record["frequencia"] is not None
             ]
-            return registros
+            if registros:
+                return registros
+
+            # Fallback gracioso: combina coocorrência nacional com atividades ativas presentes no município
+            fallback_query = """
+            MATCH (m:Municipio)
+            WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
+            WITH m.codigo_ibge AS ibge_real, m
+            MATCH (c1:CNAE)
+            WHERE c1.codigo = $fmt OR c1.codigo_raw = $raw
+            MATCH (c1)-[r:COOCORRE_GERAL]-(c2:CNAE)
+            MATCH (c2)-[p:PRESENTE_EM]->(m)
+            WHERE coalesce(p.estoque_ativas, p.quantidade_empresas_ativas, 0) > 0
+            RETURN c2.codigo AS codigo,
+                   c2.descricao AS descricao,
+                   c2.secao AS secao,
+                   r.frequencia AS frequencia,
+                   ibge_real AS codigo_ibge
+            ORDER BY r.frequencia DESC
+            LIMIT $limite
+            """
+            fb_result = session.run(fallback_query, fmt=fmt, raw=raw, ibge=ibge_str, limite=limite)
+            return [
+                {
+                    "codigo": record["codigo"],
+                    "descricao": record["descricao"],
+                    "secao": record["secao"],
+                    "frequencia": int(record["frequencia"]),
+                    "codigo_ibge": record["codigo_ibge"],
+                }
+                for record in fb_result
+            ]
     except Neo4jError as exc:
         logger.error("Erro Cypher em buscar_coocorrencia_cnaes_municipio: %s", exc.message)
         raise RuntimeError(f"Falha na consulta ao banco de grafos: {exc.message}") from exc
@@ -327,11 +359,16 @@ def buscar_perfil_economico_municipio(
     ORDER BY coalesce(r.estoque_ativas, r.quantidade_empresas_ativas, 0) DESC
     WITH m, e, reg, ri, rint,
          sum(coalesce(r.estoque_ativas, r.quantidade_empresas_ativas, 0)) AS total_empresas_ativas,
+         sum(coalesce(r.estoque_mei, 0)) AS total_empresas_mei,
+         sum(coalesce(r.estoque_simples, 0)) AS total_empresas_simples,
          collect({
              codigo: c.codigo,
              descricao: c.descricao,
              secao: c.secao,
              empresas_ativas: coalesce(r.estoque_ativas, r.quantidade_empresas_ativas, 0),
+             estoque_mei: coalesce(r.estoque_mei, 0),
+             estoque_simples: coalesce(r.estoque_simples, 0),
+             taxa_mei: coalesce(r.taxa_mei, 0.0),
              abertas_ultimos_5_anos: coalesce(r.abertas_ultimos_5_anos, 0),
              encerradas_ultimos_5_anos: coalesce(r.encerradas_ultimos_5_anos, 0),
              taxa_sobrevivencia_5_anos: coalesce(r.taxa_sobrevivencia_5_anos, 0.0),
@@ -345,6 +382,8 @@ def buscar_perfil_economico_municipio(
            e.nome AS estado_nome,
            reg.nome AS regiao_nome,
            total_empresas_ativas,
+           total_empresas_mei,
+           total_empresas_simples,
            top_atividades
     """
     try:
@@ -363,6 +402,10 @@ def buscar_perfil_economico_municipio(
                     "descricao": ativ["descricao"],
                     "secao": ativ["secao"],
                     "empresas_ativas": int(ativ["empresas_ativas"]),
+                    "estoque_mei": int(ativ.get("estoque_mei") or 0),
+                    "estoque_simples": int(ativ.get("estoque_simples") or 0),
+                    "taxa_mei": round(float(ativ.get("taxa_mei") or 0.0), 4),
+                    "taxa_mei_percentual": f"{round(float(ativ.get('taxa_mei') or 0.0) * 100, 1)}%",
                     "abertas_ultimos_5_anos": int(ativ["abertas_ultimos_5_anos"]),
                     "encerradas_ultimos_5_anos": int(ativ["encerradas_ultimos_5_anos"]),
                     "taxa_sobrevivencia_5_anos": round(float(ativ["taxa_sobrevivencia_5_anos"]), 4),
@@ -372,6 +415,11 @@ def buscar_perfil_economico_municipio(
                 for ativ in result["top_atividades"]
                 if ativ and ativ["codigo"] is not None
             ]
+
+            total_ativas = int(result["total_empresas_ativas"] or 0)
+            total_mei = int(result["total_empresas_mei"] or 0)
+            total_simples = int(result["total_empresas_simples"] or 0)
+            taxa_mei_geral = round(total_mei / total_ativas, 4) if total_ativas > 0 else 0.0
 
             return {
                 "encontrado": True,
@@ -383,7 +431,11 @@ def buscar_perfil_economico_municipio(
                 "estado": str(result["estado_nome"] or ""),
                 "regiao": str(result["regiao_nome"] or ""),
                 "macrorregiao": str(result["regiao_nome"] or ""),
-                "total_empresas_ativas_mapeadas": int(result["total_empresas_ativas"] or 0),
+                "total_empresas_ativas_mapeadas": total_ativas,
+                "total_empresas_mei": total_mei,
+                "total_empresas_simples": total_simples,
+                "taxa_mei_geral_municipio": taxa_mei_geral,
+                "taxa_mei_geral_percentual": f"{round(taxa_mei_geral * 100, 1)}%",
                 "principais_cnaes": atividades,
             }
     except Neo4jError as exc:
@@ -416,21 +468,30 @@ def buscar_perfil_economico_regiao_ibge(
     MATCH (m)-[:PERTENCE_A*1..3]->(e:Estado)
     OPTIONAL MATCH (c:CNAE)-[r:PRESENTE_EM]->(m)
     WITH ri, e, collect(DISTINCT m.nome) AS municipios, c, 
-         sum(coalesce(r.estoque_ativas, r.quantidade_empresas_ativas, 0)) AS cnae_empresas_total
+         sum(coalesce(r.estoque_ativas, r.quantidade_empresas_ativas, 0)) AS cnae_empresas_total,
+         sum(coalesce(r.estoque_mei, 0)) AS cnae_mei_total,
+         sum(coalesce(r.estoque_simples, 0)) AS cnae_simples_total
     ORDER BY cnae_empresas_total DESC
     WITH ri, e, municipios,
          sum(cnae_empresas_total) AS total_empresas_regiao,
+         sum(cnae_mei_total) AS total_mei_regiao,
+         sum(cnae_simples_total) AS total_simples_regiao,
          collect({
              codigo: c.codigo,
              descricao: c.descricao,
              secao: c.secao,
-             empresas_ativas: cnae_empresas_total
+             empresas_ativas: cnae_empresas_total,
+             estoque_mei: cnae_mei_total,
+             estoque_simples: cnae_simples_total,
+             taxa_mei: CASE WHEN cnae_empresas_total > 0 THEN (cnae_mei_total * 1.0 / cnae_empresas_total) ELSE 0.0 END
          })[0..$top_cnaes] AS top_atividades
     RETURN ri.nome AS nome_regiao,
            labels(ri)[0] AS tipo_regiao,
            e.uf AS uf,
            municipios,
            total_empresas_regiao,
+           total_mei_regiao,
+           total_simples_regiao,
            top_atividades
     LIMIT 1
     """
@@ -450,10 +511,19 @@ def buscar_perfil_economico_regiao_ibge(
                     "descricao": ativ["descricao"],
                     "secao": ativ["secao"],
                     "empresas_ativas": int(ativ["empresas_ativas"]),
+                    "estoque_mei": int(ativ.get("estoque_mei") or 0),
+                    "estoque_simples": int(ativ.get("estoque_simples") or 0),
+                    "taxa_mei": round(float(ativ.get("taxa_mei") or 0.0), 4),
+                    "taxa_mei_percentual": f"{round(float(ativ.get('taxa_mei') or 0.0) * 100, 1)}%",
                 }
                 for ativ in result["top_atividades"]
                 if ativ and ativ["codigo"] is not None
             ]
+
+            total_regiao = int(result["total_empresas_regiao"] or 0)
+            total_mei = int(result["total_mei_regiao"] or 0)
+            total_simples = int(result["total_simples_regiao"] or 0)
+            taxa_mei_regiao = round(total_mei / total_regiao, 4) if total_regiao > 0 else 0.0
 
             return {
                 "encontrado": True,
@@ -462,7 +532,11 @@ def buscar_perfil_economico_regiao_ibge(
                 "uf": result["uf"],
                 "total_municipios_integrantes": len(result["municipios"]),
                 "municipios": sorted(result["municipios"]),
-                "total_empresas_ativas_polo_regional": int(result["total_empresas_regiao"] or 0),
+                "total_empresas_ativas_polo_regional": total_regiao,
+                "total_empresas_mei_polo_regional": total_mei,
+                "total_empresas_simples_polo_regional": total_simples,
+                "taxa_mei_polo_regional": taxa_mei_regiao,
+                "taxa_mei_polo_regional_percentual": f"{round(taxa_mei_regiao * 100, 1)}%",
                 "principais_cnaes_polo_regional": atividades,
             }
     except Neo4jError as exc:
@@ -475,17 +549,17 @@ def buscar_dinamica_sobrevivencia_cnae(
     codigo_cnae: str, codigo_ibge: str
 ) -> Dict[str, Any]:
     """
-    Consulta a dinâmica de mercado, ritmo de encerramentos e taxa de sobrevivência (safra de 5 anos)
-    para uma atividade CNAE específica dentro de um município brasileiro.
+    Consulta a dinâmica de mercado, ritmo de encerramentos, taxa de sobrevivência (safra de 5 anos)
+    e composição de MEI vs Simples Nacional para uma atividade CNAE específica dentro de um município brasileiro.
 
-    Baseado na metodologia formal Sebrae/IBGE (coorte de 5 anos), permitindo avaliar risco e viabilidade.
+    Baseado na metodologia formal Sebrae/IBGE (coorte de 5 anos), permitindo avaliar risco, viabilidade e maturidade de porte.
 
     Args:
         codigo_cnae: Código da atividade CNAE (ex: '6201-5/01' ou '6201501').
         codigo_ibge: Código IBGE (ex: '3550308') ou nome do município (ex: 'São Paulo').
 
     Returns:
-        Dicionário com métricas de estoque ativo, sobrevivência em 5 anos, saldo recente e diagnóstico de mercado.
+        Dicionário com métricas de estoque ativo, divisão MEI/Simples/Geral, sobrevivência em 5 anos e diagnóstico de mercado.
     """
     fmt, raw = normalizar_cnae(codigo_cnae)
     ibge_str = codigo_ibge.strip()
@@ -495,7 +569,7 @@ def buscar_dinamica_sobrevivencia_cnae(
     WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
     MATCH (c:CNAE)
     WHERE c.codigo = $fmt OR c.codigo_raw = $raw
-    MATCH (m)-[:PERTENCE_A]->(e:Estado)
+    OPTIONAL MATCH (m)-[:PERTENCE_A*1..3]->(e:Estado)
     OPTIONAL MATCH (e)-[:PERTENCE_A]->(reg:Regiao)
     OPTIONAL MATCH (c)-[r:PRESENTE_EM]->(m)
     RETURN m.codigo_ibge AS codigo_ibge,
@@ -508,6 +582,9 @@ def buscar_dinamica_sobrevivencia_cnae(
            c.secao AS cnae_secao,
            r.estoque_ativas AS estoque_ativas,
            r.quantidade_empresas_ativas AS quantidade_legado,
+           r.estoque_mei AS estoque_mei,
+           r.estoque_simples AS estoque_simples,
+           r.taxa_mei AS taxa_mei,
            r.abertas_ultimos_5_anos AS abertas_5a,
            r.encerradas_ultimos_5_anos AS encerradas_5a,
            r.taxa_sobrevivencia_5_anos AS taxa_sobrevivencia,
@@ -523,6 +600,9 @@ def buscar_dinamica_sobrevivencia_cnae(
                 }
 
             estoque = int(record["estoque_ativas"] or record["quantidade_legado"] or 0)
+            estoque_mei = int(record["estoque_mei"] or 0)
+            estoque_simples = int(record["estoque_simples"] or 0)
+            taxa_mei = float(record["taxa_mei"] or (round(estoque_mei / estoque, 4) if estoque > 0 else 0.0))
             abertas_5a = int(record["abertas_5a"] or 0)
             encerradas_5a = int(record["encerradas_5a"] or 0)
             taxa_sob = float(record["taxa_sobrevivencia"] or 0.0)
@@ -535,6 +615,14 @@ def buscar_dinamica_sobrevivencia_cnae(
                 diagnostico = "Resiliência moderada / padrão de mercado (sobrevivência entre 55% e 75%)"
             else:
                 diagnostico = "Alto risco de encerramento / mercado com churn elevado"
+
+            # Perfil predominante de porte / formalização
+            if taxa_mei >= 0.70:
+                perfil_porte = "Predominância massiva de MEI (autônomos / microempreendedores individuais)"
+            elif taxa_mei >= 0.40:
+                perfil_porte = "Misto equilibrado (relevante presença de MEIs e PMEs estruturadas)"
+            else:
+                perfil_porte = "Predominância de empresas estruturadas (PMEs do Simples ou Médias/Grandes do Regime Geral)"
 
             return {
                 "encontrado": True,
@@ -552,6 +640,12 @@ def buscar_dinamica_sobrevivencia_cnae(
                 },
                 "indicadores_mercado": {
                     "estoque_empresas_ativas": estoque,
+                    "estoque_mei": estoque_mei,
+                    "estoque_simples": estoque_simples,
+                    "estoque_outros_regimes": max(0, estoque - estoque_simples),
+                    "taxa_mei": round(taxa_mei, 4),
+                    "taxa_mei_percentual": f"{round(taxa_mei * 100, 1)}%",
+                    "perfil_predominante_porte": perfil_porte,
                     "abertas_ultimos_5_anos": abertas_5a,
                     "encerradas_ultimos_5_anos": encerradas_5a,
                     "taxa_sobrevivencia_5_anos": round(taxa_sob, 4),
@@ -670,8 +764,14 @@ def buscar_visao_macro_regiao(nome_regiao: str) -> Dict[str, Any]:
 
 def run_server() -> None:
     try:
-        logger.info("Iniciando Servidor MCP Geo-CNAE...")
-        mcp.run()
+        transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
+        logger.info("Iniciando Servidor MCP Geo-CNAE (transporte: %s)...", transport)
+        if transport in ("sse", "streamable-http"):
+            host = os.getenv("MCP_HOST", "0.0.0.0")
+            port = int(os.getenv("PORT", os.getenv("MCP_PORT", "8000")))
+            mcp.run(transport=transport, host=host, port=port)
+        else:
+            mcp.run(transport="stdio")
     except (KeyboardInterrupt, SystemExit):
         logger.info("Servidor MCP encerrado.")
     finally:

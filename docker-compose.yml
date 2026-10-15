@@ -56,5 +56,25 @@ services:
     profiles:
       - ingestao
 
+  # Enriquecimento com Simples Nacional e MEI
+  # Uso: docker compose run --rm geo-cnae-ingestor-simples
+  geo-cnae-ingestor-simples:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-geo-cnae-ingestor-simples
+    command: ["python", "ingestao_simples.py"]
+    environment:
+      - MEMGRAPH_URI=bolt://memgraph:7687
+      - MEMGRAPH_USER=
+      - MEMGRAPH_PASSWORD=
+      - DADOS_RECEITA_DIR=/dados_receita
+    volumes:
+      - ${DADOS_RECEITA_DIR:-/home/ubuntu/dados_receita}:/dados_receita:ro
+    depends_on:
+      - memgraph
+    profiles:
+      - ingestao
+
 volumes:
   memgraph_data:
