@@ -124,18 +124,24 @@ class MemgraphIngestor:
             "CREATE CONSTRAINT ON (m:Municipio) ASSERT m.codigo_ibge IS UNIQUE;",
             "CREATE CONSTRAINT ON (e:Estado) ASSERT e.uf IS UNIQUE;",
             "CREATE CONSTRAINT ON (r:Regiao) ASSERT r.nome IS UNIQUE;",
+            "CREATE INDEX ON :CNAE(codigo);",
+            "CREATE INDEX ON :CNAE(codigo_raw);",
+            "CREATE INDEX ON :Municipio(codigo_ibge);",
+            "CREATE INDEX ON :Municipio(nome);",
+            "CREATE INDEX ON :Estado(uf);",
+            "CREATE INDEX ON :Regiao(nome);",
         ]
 
         with self._driver.session() as session:
             for query in constraints_queries:
                 try:
                     session.run(query)
-                    logger.info("Constraint processada: %s", query.strip())
+                    logger.info("Constraint/Índice processado: %s", query.strip())
                 except Neo4jError as exc:
-                    # Em caso de constraint já existente, loga em nível informativo
-                    logger.info("Aviso de constraint (pode já existir): %s", exc.message)
+                    # Em caso de constraint ou índice já existente, loga em nível informativo
+                    logger.info("Aviso de constraint/índice (pode já existir): %s", exc.message)
                 except Exception as exc:
-                    logger.warning("Falha ao registrar constraint '%s': %s", query, exc)
+                    logger.warning("Falha ao registrar constraint/índice '%s': %s", query, exc)
 
     def inserir_estados(self, estados: List[EstadoDTO]) -> None:
         """Insere nós (:Regiao), (:Estado) e arestas (:Estado)-[:PERTENCE_A]->(:Regiao)."""

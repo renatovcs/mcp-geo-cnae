@@ -123,6 +123,7 @@ class TestMCPGeoCNAEReal(unittest.TestCase):
         self.assertIn("PR", ufs)
         self.assertIn("SC", ufs)
         self.assertIn("RS", ufs)
+        self.assertGreater(resultado["total_municipios_mapeados"], 50)
 
     def test_buscar_perfil_economico_regiao_ibge(self) -> None:
         resultado: Dict[str, Any] = buscar_perfil_economico_regiao_ibge("Curitiba", top_cnaes=5)

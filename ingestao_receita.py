@@ -148,8 +148,12 @@ class ReceitaGraphIngestor:
             "CREATE CONSTRAINT ON (r:Regiao) ASSERT r.nome IS UNIQUE;",
             "CREATE CONSTRAINT ON (ri:RegiaoImediata) ASSERT ri.codigo IS UNIQUE;",
             "CREATE CONSTRAINT ON (rint:RegiaoIntermediaria) ASSERT rint.codigo IS UNIQUE;",
+            "CREATE INDEX ON :CNAE(codigo);",
             "CREATE INDEX ON :CNAE(codigo_raw);",
+            "CREATE INDEX ON :Municipio(codigo_ibge);",
             "CREATE INDEX ON :Municipio(nome);",
+            "CREATE INDEX ON :Estado(uf);",
+            "CREATE INDEX ON :Regiao(nome);",
             "CREATE INDEX ON :RegiaoImediata(nome);",
             "CREATE INDEX ON :RegiaoIntermediaria(nome);",
         ]

@@ -9,6 +9,12 @@ services:
     volumes:
       - memgraph_data:/var/lib/memgraph
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'RETURN 1;' | mgconsole || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   memgraph-lab:
     image: memgraph/lab:latest
@@ -38,7 +44,14 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
     depends_on:
-      - memgraph
+      memgraph:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   # Worker de Ingestão: processa a pasta /dados_receita da Receita Federal para o Memgraph

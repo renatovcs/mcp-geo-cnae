@@ -16,6 +16,8 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 from dotenv import load_dotenv
 from neo4j import Auth, Driver, GraphDatabase, Session
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -724,7 +726,7 @@ def buscar_visao_macro_regiao(nome_regiao: str) -> Dict[str, Any]:
     MATCH (r:Regiao)
     WHERE toLower(r.nome) = toLower($regiao)
     MATCH (e:Estado)-[:PERTENCE_A]->(r)
-    OPTIONAL MATCH (m:Municipio)-[:PERTENCE_A]->(e)
+    OPTIONAL MATCH (m:Municipio)-[:PERTENCE_A*1..3]->(e)
     WITH r, e, collect({
         codigo_ibge: m.codigo_ibge,
         nome: m.nome
@@ -760,6 +762,35 @@ def buscar_visao_macro_regiao(nome_regiao: str) -> Dict[str, Any]:
     except Neo4jError as exc:
         logger.error("Erro Cypher em buscar_visao_macro_regiao: %s", exc.message)
         raise RuntimeError(f"Falha na consulta ao banco de grafos: {exc.message}") from exc
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request) -> Response:
+    """Verifica integridade do servidor MCP e conectividade com o banco Memgraph."""
+    try:
+        with db_client.session() as session:
+            record = session.run("MATCH (m:Municipio) RETURN count(m) AS total;").single()
+            total_muns = record["total"] if record else 0
+        return JSONResponse(
+            {
+                "status": "healthy",
+                "service": "mcp-geo-cnae",
+                "memgraph": "connected",
+                "total_municipios_indexados": total_muns,
+            },
+            status_code=200,
+        )
+    except Exception as exc:
+        logger.error("Health check falhou: %s", exc)
+        return JSONResponse(
+            {
+                "status": "unhealthy",
+                "service": "mcp-geo-cnae",
+                "memgraph": "disconnected",
+                "detail": str(exc),
+            },
+            status_code=503,
+        )
 
 
 def run_server() -> None:
