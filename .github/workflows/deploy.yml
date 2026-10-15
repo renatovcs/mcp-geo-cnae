@@ -83,8 +83,8 @@ jobs:
 
             echo "==> 2. Atualizando containers Memgraph, Memgraph Lab e Servidor MCP..."
             docker stop memgraph-mage 2>/dev/null || true
-            docker rm memgraph-mage 2>/dev/null || true
             docker compose up -d --build memgraph memgraph-lab geo-cnae-server
+            docker network connect anotae_network_prod mcp-geo-cnae-server 2>/dev/null || true
 
             echo "==> 3. Aguardando Memgraph inicializar na porta 7687..."
             for i in $(seq 1 30); do

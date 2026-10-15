@@ -152,10 +152,13 @@ class ReceitaGraphIngestor:
             "CREATE INDEX ON :CNAE(codigo_raw);",
             "CREATE INDEX ON :Municipio(codigo_ibge);",
             "CREATE INDEX ON :Municipio(nome);",
+            "CREATE INDEX ON :Municipio(nome_normalizado);",
             "CREATE INDEX ON :Estado(uf);",
             "CREATE INDEX ON :Regiao(nome);",
             "CREATE INDEX ON :RegiaoImediata(nome);",
+            "CREATE INDEX ON :RegiaoImediata(nome_normalizado);",
             "CREATE INDEX ON :RegiaoIntermediaria(nome);",
+            "CREATE INDEX ON :RegiaoIntermediaria(nome_normalizado);",
         ]
         with self._driver.session() as s:
             for q in queries:
@@ -235,14 +238,17 @@ class ReceitaGraphIngestor:
             info = {
                 "codigo_ibge": str(ibge),
                 "nome": nome,
+                "nome_normalizado": normalizar_texto(nome),
                 "lat": float(lat) if lat is not None else 0.0,
                 "lon": float(lon) if lon is not None else 0.0,
                 "uf": uf,
                 "siafi_tom": siafi_tom,
                 "cod_imed": str(cod_imed),
                 "nome_imed": str(nome_imed),
+                "nome_imed_normalizado": normalizar_texto(nome_imed),
                 "cod_inter": str(cod_inter),
                 "nome_inter": str(nome_inter),
+                "nome_inter_normalizado": normalizar_texto(nome_inter),
                 "nome_micro": str(nome_micro),
                 "nome_meso": str(nome_meso),
             }
@@ -252,20 +258,22 @@ class ReceitaGraphIngestor:
         q_muns = """
         UNWIND $batch AS item
         MERGE (m:Municipio {codigo_ibge: item.codigo_ibge})
-        ON CREATE SET m.nome = item.nome, m.lat = item.lat, m.lon = item.lon,
+        ON CREATE SET m.nome = item.nome, m.nome_normalizado = item.nome_normalizado,
+                      m.lat = item.lat, m.lon = item.lon,
                       m.regiao_imediata = item.nome_imed, m.regiao_intermediaria = item.nome_inter,
                       m.microrregiao = item.nome_micro, m.mesorregiao = item.nome_meso
-        ON MATCH SET m.nome = item.nome, m.lat = item.lat, m.lon = item.lon,
+        ON MATCH SET m.nome = item.nome, m.nome_normalizado = item.nome_normalizado,
+                     m.lat = item.lat, m.lon = item.lon,
                      m.regiao_imediata = item.nome_imed, m.regiao_intermediaria = item.nome_inter,
                      m.microrregiao = item.nome_micro, m.mesorregiao = item.nome_meso
         WITH m, item
         MATCH (e:Estado {uf: item.uf})
         MERGE (ri:RegiaoImediata {codigo: item.cod_imed})
-        ON CREATE SET ri.nome = item.nome_imed, ri.uf = item.uf
-        ON MATCH SET ri.nome = item.nome_imed, ri.uf = item.uf
+        ON CREATE SET ri.nome = item.nome_imed, ri.nome_normalizado = item.nome_imed_normalizado, ri.uf = item.uf
+        ON MATCH SET ri.nome = item.nome_imed, ri.nome_normalizado = item.nome_imed_normalizado, ri.uf = item.uf
         MERGE (rint:RegiaoIntermediaria {codigo: item.cod_inter})
-        ON CREATE SET rint.nome = item.nome_inter, rint.uf = item.uf
-        ON MATCH SET rint.nome = item.nome_inter, rint.uf = item.uf
+        ON CREATE SET rint.nome = item.nome_inter, rint.nome_normalizado = item.nome_inter_normalizado, rint.uf = item.uf
+        ON MATCH SET rint.nome = item.nome_inter, rint.nome_normalizado = item.nome_inter_normalizado, rint.uf = item.uf
         MERGE (m)-[:PERTENCE_A]->(ri)
         MERGE (ri)-[:PERTENCE_A]->(rint)
         MERGE (rint)-[:PERTENCE_A]->(e)

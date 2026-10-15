@@ -134,6 +134,16 @@ class TestMCPGeoCNAEReal(unittest.TestCase):
         self.assertGreater(resultado["total_municipios_integrantes"], 0)
         self.assertIsInstance(resultado["principais_cnaes_polo_regional"], list)
 
+    def test_busca_tolerante_a_acentos(self) -> None:
+        # Busca sem acento para cidades acentuadas
+        r1 = buscar_perfil_economico_municipio("sao paulo", top_cnaes=3)
+        self.assertTrue(r1["encontrado"])
+        self.assertEqual(r1["nome"], "São Paulo")
+
+        r2 = buscar_malha_municipal_vizinha("santo andre")
+        self.assertTrue(r2["encontrado"])
+        self.assertEqual(r2["nome"], "Santo André")
+
     def test_municipio_inexistente(self) -> None:
         ibge_fantasma = "9999999"
         resultado: Dict[str, Any] = buscar_malha_municipal_vizinha(ibge_fantasma)

@@ -175,10 +175,11 @@ def buscar_coocorrencia_cnaes_municipio(
     """
     fmt, raw = normalizar_cnae(codigo_cnae)
     ibge_str = codigo_ibge.strip()
+    norm_mun = normalizar_municipio(ibge_str)
 
     query = """
     MATCH (m:Municipio)
-    WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
+    WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge) OR m.nome_normalizado = $norm
     WITH m.codigo_ibge AS ibge_real, m
     MATCH (c1:CNAE)
     WHERE c1.codigo = $fmt OR c1.codigo_raw = $raw
@@ -193,7 +194,7 @@ def buscar_coocorrencia_cnaes_municipio(
     """
     try:
         with db_client.session() as session:
-            result = session.run(query, fmt=fmt, raw=raw, ibge=ibge_str, limite=limite)
+            result = session.run(query, fmt=fmt, raw=raw, ibge=ibge_str, norm=norm_mun, limite=limite)
             registros = [
                 {
                     "codigo": record["codigo"],
@@ -211,7 +212,7 @@ def buscar_coocorrencia_cnaes_municipio(
             # Fallback gracioso: combina coocorrência nacional com atividades ativas presentes no município
             fallback_query = """
             MATCH (m:Municipio)
-            WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
+            WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge) OR m.nome_normalizado = $norm
             WITH m.codigo_ibge AS ibge_real, m
             MATCH (c1:CNAE)
             WHERE c1.codigo = $fmt OR c1.codigo_raw = $raw
@@ -219,14 +220,14 @@ def buscar_coocorrencia_cnaes_municipio(
             MATCH (c2)-[p:PRESENTE_EM]->(m)
             WHERE coalesce(p.estoque_ativas, p.quantidade_empresas_ativas, 0) > 0
             RETURN c2.codigo AS codigo,
-                   c2.descricao AS descricao,
-                   c2.secao AS secao,
-                   r.frequencia AS frequencia,
-                   ibge_real AS codigo_ibge
+                    c2.descricao AS descricao,
+                    c2.secao AS secao,
+                    r.frequencia AS frequencia,
+                    ibge_real AS codigo_ibge
             ORDER BY r.frequencia DESC
             LIMIT $limite
             """
-            fb_result = session.run(fallback_query, fmt=fmt, raw=raw, ibge=ibge_str, limite=limite)
+            fb_result = session.run(fallback_query, fmt=fmt, raw=raw, ibge=ibge_str, norm=norm_mun, limite=limite)
             return [
                 {
                     "codigo": record["codigo"],
@@ -256,9 +257,10 @@ def buscar_malha_municipal_vizinha(codigo_ibge: str) -> Dict[str, Any]:
         Dicionário estruturado com dados do município, hierarquia regional completa do IBGE e lista de vizinhos.
     """
     ibge_str = codigo_ibge.strip()
+    norm_mun = normalizar_municipio(ibge_str)
     query = """
     MATCH (m:Municipio)
-    WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
+    WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge) OR m.nome_normalizado = $norm
     OPTIONAL MATCH (m)-[:PERTENCE_A]->(ri:RegiaoImediata)
     OPTIONAL MATCH (ri)-[:PERTENCE_A]->(rint:RegiaoIntermediaria)
     OPTIONAL MATCH (rint)-[:PERTENCE_A]->(e:Estado)
@@ -286,7 +288,7 @@ def buscar_malha_municipal_vizinha(codigo_ibge: str) -> Dict[str, Any]:
     """
     try:
         with db_client.session() as session:
-            result = session.run(query, ibge=ibge_str).single()
+            result = session.run(query, ibge=ibge_str, norm=norm_mun).single()
             if not result:
                 return {
                     "encontrado": False,
@@ -349,9 +351,10 @@ def buscar_perfil_economico_municipio(
         Dicionário com dados do município, Região Imediata, Intermediária, Estado, total de empresas e ranking enriquecido.
     """
     ibge_str = codigo_ibge.strip()
+    norm_mun = normalizar_municipio(ibge_str)
     query = """
     MATCH (m:Municipio)
-    WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
+    WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge) OR m.nome_normalizado = $norm
     OPTIONAL MATCH (m)-[:PERTENCE_A]->(ri:RegiaoImediata)
     OPTIONAL MATCH (ri)-[:PERTENCE_A]->(rint:RegiaoIntermediaria)
     OPTIONAL MATCH (rint)-[:PERTENCE_A]->(e:Estado)
@@ -390,7 +393,7 @@ def buscar_perfil_economico_municipio(
     """
     try:
         with db_client.session() as session:
-            result = session.run(query, ibge=ibge_str, top_cnaes=top_cnaes).single()
+            result = session.run(query, ibge=ibge_str, norm=norm_mun, top_cnaes=top_cnaes).single()
             if not result or result["codigo_ibge"] is None:
                 return {
                     "encontrado": False,
@@ -463,9 +466,11 @@ def buscar_perfil_economico_regiao_ibge(
         Dicionário com a lista de municípios integrantes, total regional de empresas ativas e principais CNAEs.
     """
     regiao_str = nome_regiao.strip()
+    norm_reg = normalizar_municipio(regiao_str)
     query = """
     MATCH (ri)
-    WHERE (ri:RegiaoImediata OR ri:RegiaoIntermediaria) AND toLower(ri.nome) = toLower($nome_regiao)
+    WHERE (ri:RegiaoImediata OR ri:RegiaoIntermediaria) 
+      AND (toLower(ri.nome) = toLower($nome_regiao) OR ri.nome_normalizado = $norm)
     MATCH (m:Municipio)-[:PERTENCE_A*1..2]->(ri)
     MATCH (m)-[:PERTENCE_A*1..3]->(e:Estado)
     OPTIONAL MATCH (c:CNAE)-[r:PRESENTE_EM]->(m)
@@ -499,7 +504,7 @@ def buscar_perfil_economico_regiao_ibge(
     """
     try:
         with db_client.session() as session:
-            result = session.run(query, nome_regiao=regiao_str, top_cnaes=top_cnaes).single()
+            result = session.run(query, nome_regiao=regiao_str, norm=norm_reg, top_cnaes=top_cnaes).single()
             if not result or not result["nome_regiao"]:
                 return {
                     "encontrado": False,
@@ -565,10 +570,11 @@ def buscar_dinamica_sobrevivencia_cnae(
     """
     fmt, raw = normalizar_cnae(codigo_cnae)
     ibge_str = codigo_ibge.strip()
+    norm_mun = normalizar_municipio(ibge_str)
 
     query = """
     MATCH (m:Municipio)
-    WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge)
+    WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge) OR m.nome_normalizado = $norm
     MATCH (c:CNAE)
     WHERE c.codigo = $fmt OR c.codigo_raw = $raw
     OPTIONAL MATCH (m)-[:PERTENCE_A*1..3]->(e:Estado)
@@ -594,7 +600,7 @@ def buscar_dinamica_sobrevivencia_cnae(
     """
     try:
         with db_client.session() as session:
-            record = session.run(query, fmt=fmt, raw=raw, ibge=ibge_str).single()
+            record = session.run(query, fmt=fmt, raw=raw, ibge=ibge_str, norm=norm_mun).single()
             if not record or not record["municipio_nome"]:
                 return {
                     "encontrado": False,

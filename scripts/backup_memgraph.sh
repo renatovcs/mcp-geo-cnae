@@ -14,7 +14,7 @@ BACKUP_FILE="${BACKUP_DIR}/memgraph_dump_${TIMESTAMP}.cypher.gz"
 echo "==> [$(date +'%Y-%m-%d %H:%M:%S')] Iniciando dump do banco Memgraph..."
 
 # Executa DUMP DATABASE via mgconsole e compacta em streaming
-docker exec -i memgraph mgconsole -c "DUMP DATABASE;" | gzip -9 > "${BACKUP_FILE}"
+echo "DUMP DATABASE;" | docker exec -i memgraph mgconsole | gzip -9 > "${BACKUP_FILE}"
 
 echo "==> [$(date +'%Y-%m-%d %H:%M:%S')] Backup concluído com sucesso!"
 ls -lh "${BACKUP_FILE}"
