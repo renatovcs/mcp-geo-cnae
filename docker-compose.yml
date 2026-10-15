@@ -28,10 +28,15 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: mcp-geo-cnae-server
+    ports:
+      - "8006:8000"
     environment:
       - MEMGRAPH_URI=bolt://memgraph:7687
       - MEMGRAPH_USER=
       - MEMGRAPH_PASSWORD=
+      - MCP_TRANSPORT=streamable-http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
     depends_on:
       - memgraph
     restart: unless-stopped

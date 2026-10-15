@@ -764,10 +764,11 @@ def buscar_visao_macro_regiao(nome_regiao: str) -> Dict[str, Any]:
 
 def run_server() -> None:
     try:
-        transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
+        raw_transport = os.getenv("MCP_TRANSPORT", "streamable-http").lower().replace("_", "-")
+        transport = "streamable-http" if "http" in raw_transport else ("sse" if "sse" in raw_transport else "stdio")
         logger.info("Iniciando Servidor MCP Geo-CNAE (transporte: %s)...", transport)
         if transport in ("sse", "streamable-http"):
-            host = os.getenv("MCP_HOST", "0.0.0.0")
+            host = os.getenv("MCP_HOST", os.getenv("HOST", "0.0.0.0"))
             port = int(os.getenv("PORT", os.getenv("MCP_PORT", "8000")))
             mcp.run(transport=transport, host=host, port=port)
         else:

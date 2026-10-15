@@ -20,7 +20,12 @@ ENV PYTHONUNBUFFERED=1 \
     MEMGRAPH_URI=bolt://memgraph:7687 \
     MEMGRAPH_USER="" \
     MEMGRAPH_PASSWORD="" \
-    DADOS_RECEITA_DIR=/dados_receita
+    DADOS_RECEITA_DIR=/dados_receita \
+    MCP_TRANSPORT=streamable-http \
+    MCP_HOST=0.0.0.0 \
+    MCP_PORT=8000
+
+EXPOSE 8000
 
 # Comando padrão inicia o servidor MCP
 CMD ["python", "server.py"]
