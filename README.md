@@ -111,7 +111,10 @@ docker compose run --rm geo-cnae-ingestor
 
 > **Dica**: Acompanhe o log detalhado no terminal. A operação é executada com batches otimizados `UNWIND` e encerra o container automaticamente ao concluir.
 
-### 4. Iniciar o Servidor MCP
+### 4. Iniciar o Servidor MCP (Modo HTTP Persistente)
+
+O servidor MCP opera em modo `streamable-http` na porta **8000** interna (mapeada para a porta **8006** do host).
+*(Nota: O modo `streamable-http` evita o encerramento prematuro que ocorreria no modo `stdio` dentro do Docker sem TTY interativo).*
 
 ```bash
 docker compose up -d geo-cnae-server
@@ -127,13 +130,11 @@ docker compose logs -f geo-cnae-server
 ## 💻 Como Executar em Ambiente Local / Desenvolvimento
 
 ### 1. Subir os containers do Memgraph
-
 ```bash
 docker compose up -d memgraph memgraph-lab
 ```
 
 ### 2. Instalar Dependências e Executar Testes Automatizados
-
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -142,13 +143,11 @@ python -m unittest tests/test_mcp_geo_cnae.py
 ```
 
 ### 3. Ingestão Sintética Rápida (Mock de Validação)
-
 ```bash
 python ingestao.py
 ```
 
 ### 4. Iniciar Servidor MCP Local via Terminal
-
 ```bash
 python server.py
 ```
@@ -157,7 +156,19 @@ python server.py
 
 ## 🔌 Configuração no Cliente MCP (Claude Desktop / Cursor / Antigravity)
 
-### Conexão Local:
+### Opção 1: Conexão Direta HTTP / Streamable (Recomendado para Servidor Remoto)
+No seu cliente compatível com MCP (Antigravity, Cursor, etc.), configure a URL HTTP direta:
+```json
+{
+  "mcpServers": {
+    "geo-cnae-remote": {
+      "url": "http://141.148.38.30:8006/mcp"
+    }
+  }
+}
+```
+
+### Opção 2: Conexão Local via stdio:
 ```json
 {
   "mcpServers": {
@@ -174,7 +185,7 @@ python server.py
 }
 ```
 
-### Conexão com Servidor OCI Remoto:
+### Opção 3: Conexão com Servidor OCI via SSH Bridge:
 ```json
 {
   "mcpServers": {
@@ -191,21 +202,85 @@ python server.py
 
 ---
 
-## 🔍 Exemplos de Consultas Cypher no Memgraph Lab
+## 🔍 Guia Completo do Memgraph Lab (Interface Web)
 
-Acesse `http://141.148.38.30:3000` (ou `http://localhost:3000`) para rodar consultas exploratórias:
+Acesse `http://141.148.38.30:3000` (ou `http://localhost:3000` se estiver rodando localmente).
 
-### 1. Dinâmica de sobrevivência setorial por município:
+### ⚠️ Regras Cruciais para Consultas Cypher
+
+1. **Direção da Aresta `PRESENTE_EM`**:
+   - No modelo, o CNAE está presente no município:
+     `(:CNAE)-[:PRESENTE_EM]->(:Municipio)`
+   - Se você inverter a seta (`(:Municipio)-[:PRESENTE_EM]->(:CNAE)`), o Cypher **não encontrará nenhuma aresta e retornará vazio (`No data returned`)**. Você também pode usar a aresta sem setas: `(:Municipio)-[:PRESENTE_EM]-(:CNAE)`.
+
+2. **Nomes Exatos das Propriedades**:
+   - **Nó `(:CNAE)`**:
+     - `codigo` (ex: `"6201-5/01"`)
+     - `descricao` (ex: `"Desenvolvimento de programas de computador sob encomenda"`) — *não use `denominacao`*.
+     - `secao` (ex: `"J"`)
+   - **Nó `(:Municipio)`**:
+     - `nome` (ex: `"São Paulo"`, `"Florianópolis"`)
+     - `codigo_ibge` (ex: `"3550308"`)
+     - `lat`, `lon` (coordenadas geodésicas)
+     - `regiao_imediata`, `regiao_intermediaria`, `microrregiao`, `mesorregiao`
+   - **Aresta `[:PRESENTE_EM]`**:
+     - `quantidade_empresas_ativas` (ou `estoque_ativas`): volume total de empresas ativas.
+     - `estoque_mei`: quantidade de Microempreendedores Individuais.
+     - `estoque_simples`: quantidade de optantes pelo Simples Nacional.
+     - `taxa_mei`: proporção de MEIs sobre o total (de `0.0` a `1.0`).
+     - `abertas_ultimos_5_anos`, `encerradas_ultimos_5_anos`, `saldo_recente`
+     - `taxa_sobrevivencia_5_anos`: taxa metodológica Sebrae/IBGE ($1 - \frac{\text{baixadas}}{\text{abertas}}$).
+
+3. **Como Visualizar os Nós e Arestas Graficamente**:
+   - No editor Cypher, execute uma consulta que retorne as entidades inteiras (ex: `RETURN m, p, c LIMIT 25;`).
+   - Logo abaixo da área de texto, a aba **`Graph results`** ficará clicável. Clique nela para abrir o canvas interativo 2D/3D com nós coloridos, zoom e drag-and-drop.
+
+---
+
+### 🚨 Nota sobre a aba `GraphChat (EXPERIMENTAL)`
+
+O Memgraph Lab possui uma aba chamada **GraphChat** que utiliza modelos LLM para gerar Cypher automaticamente.
+- Se ao enviar uma mensagem você receber o erro:
+  `{"error": {"code": 400, "message": "Function call is missing a thought_signature in functionCall parts..."}}`
+- **Motivo**: Modelos recentes do Google Gemini (como a série Gemini 2.x com raciocínio/*thinking*) exigem o envio de um token de `thought_signature` nas chamadas de função (`run-cypher-query`), o qual a versão atual do Memgraph Lab ainda não implementa.
+- **Solução**: No seletor de modelos do GraphChat, escolha um modelo sem thinking forçado (como **Gemini 1.5 Flash**, **Gemini 1.5 Pro**, **GPT-4o** ou **Claude 3.5 Sonnet**) ou utilize diretamente a aba oficial **`<> Query execution`**.
+
+---
+
+### 💡 Consultas Cypher Prontas para Copiar e Colar
+
+#### 1. Top 10 Atividades e Taxa de MEI em São Paulo
+```cypher
+MATCH (c:CNAE)-[p:PRESENTE_EM]->(m:Municipio {nome: "São Paulo"})
+RETURN c.codigo AS cnae, 
+       c.descricao AS atividade, 
+       p.quantidade_empresas_ativas AS total_empresas, 
+       p.estoque_mei AS mei, 
+       p.taxa_mei AS taxa_mei
+ORDER BY p.quantidade_empresas_ativas DESC
+LIMIT 10;
+```
+
+#### 2. Visualização Gráfica Interativa (Florianópolis)
+```cypher
+MATCH (c:CNAE)-[p:PRESENTE_EM]->(m:Municipio {nome: "Florianópolis"})
+RETURN m, p, c
+LIMIT 25;
+```
+*(Clique na aba `Graph results` para ver o grafo visual).*
+
+#### 3. Dinâmica de sobrevivência setorial em Curitiba:
 ```cypher
 MATCH (c:CNAE {codigo: "6201-5/01"})-[r:PRESENTE_EM]->(m:Municipio {nome: "Curitiba"})
-MATCH (m)-[:PERTENCE_A]->(e:Estado)-[:PERTENCE_A]->(reg:Regiao)
+MATCH (m)-[:PERTENCE_A*1..3]->(e:Estado)-[:PERTENCE_A]->(reg:Regiao)
 RETURN m.nome AS municipio, e.uf AS uf, reg.nome AS regiao,
-       r.estoque_ativas AS ativas,
-       r.abertas_ultimos_5_anos AS abertas_5a,
+       r.quantidade_empresas_ativas AS ativas,
+       r.estoque_mei AS mei,
+       r.estoque_simples AS simples,
        r.taxa_sobrevivencia_5_anos AS taxa_sobrevivencia;
 ```
 
-### 2. Ramos mais comuns de expansão corporativa Matriz -> Filiais:
+#### 4. Ramos mais comuns de expansão corporativa Matriz -> Filiais:
 ```cypher
 MATCH (matriz:CNAE {codigo: "6201-5/01"})-[r:GERA_FILIAL]->(filial:CNAE)
 RETURN filial.codigo AS filial_cnae, filial.descricao AS ramo_filial, r.frequencia AS ocorrencias
@@ -213,14 +288,14 @@ ORDER BY r.frequencia DESC
 LIMIT 10;
 ```
 
-### 3. Navegação territorial e municípios vizinhos:
+#### 5. Navegação territorial e municípios vizinhos:
 ```cypher
 MATCH (m:Municipio {nome: "São Paulo"})-[r:FAZ_DIVISA_COM]-(viz:Municipio)
 RETURN m.nome AS origem, viz.nome AS vizinho, r.distancia_km AS distancia_km
 ORDER BY r.distancia_km ASC;
 ```
 
-### 4. Traversal da hierarquia intraestadual do IBGE (Regiões Imediatas e Intermediárias):
+#### 6. Traversal da hierarquia intraestadual do IBGE:
 ```cypher
 MATCH (m:Municipio {nome: "Castro"})-[:PERTENCE_A]->(ri:RegiaoImediata)-[:PERTENCE_A]->(rint:RegiaoIntermediaria)-[:PERTENCE_A]->(e:Estado)-[:PERTENCE_A]->(reg:Regiao)
 RETURN m.nome AS municipio,

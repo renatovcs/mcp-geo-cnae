@@ -81,10 +81,10 @@ jobs:
             echo "==> 1. Puxando imagens Docker otimizadas..."
             docker compose pull memgraph memgraph-lab
 
-            echo "==> 2. Atualizando containers Memgraph e Memgraph Lab..."
+            echo "==> 2. Atualizando containers Memgraph, Memgraph Lab e Servidor MCP..."
             docker stop memgraph-mage 2>/dev/null || true
             docker rm memgraph-mage 2>/dev/null || true
-            docker compose up -d memgraph memgraph-lab
+            docker compose up -d --build memgraph memgraph-lab geo-cnae-server
 
             echo "==> 3. Aguardando Memgraph inicializar na porta 7687..."
             for i in $(seq 1 30); do

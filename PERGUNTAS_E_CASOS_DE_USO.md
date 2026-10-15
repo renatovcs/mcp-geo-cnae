@@ -127,3 +127,28 @@ O diferencial deste MCP é cruzar **50 milhões de CNPJs da Receita Federal** co
 | **Expansão de Franquias** | *"Que tipo de filial uma matriz de logística abre?"* | `buscar_expansao_filiais_cnae` |
 | **Visão Macrorregional** | *"Como o Nordeste está articulado no grafo?"* | `buscar_visao_macro_regiao` |
 
+---
+
+## 🖥️ Como Testar Diretamente no Memgraph Lab (Interface Visual)
+
+Se você preferir executar consultas Cypher diretamente na interface gráfica do Memgraph Lab ([http://141.148.38.30:3000](http://141.148.38.30:3000) ou `http://localhost:3000`):
+
+1. **Aba Oficial**: Utilize a aba **`<> Query execution`** (no menu esquerdo).
+2. **Aba Graph results**: Após executar consultas que retornem os nós e as arestas (`RETURN m, p, c`), clique na aba **`Graph results`** abaixo do editor para ver o grafo visual com nós coloridos.
+3. **Atenção à Direção da Seta**: A relação no banco é direcionada do CNAE para o Município:
+   ```cypher
+   // CORRETO:
+   MATCH (c:CNAE)-[p:PRESENTE_EM]->(m:Municipio {nome: "Florianópolis"})
+   RETURN m, p, c LIMIT 25;
+   
+   // OU BIDIRECIONAL:
+   MATCH (m:Municipio {nome: "Florianópolis"})-[p:PRESENTE_EM]-(c:CNAE)
+   RETURN m, p, c LIMIT 25;
+   ```
+   *(Evite `(m:Municipio)-[p:PRESENTE_EM]->(c:CNAE)`, pois a seta invertida retornará vazio).*
+4. **Propriedades Principais**:
+   - CNAE: `c.codigo`, `c.descricao`
+   - Município: `m.nome`, `m.codigo_ibge`
+   - Aresta: `p.quantidade_empresas_ativas`, `p.estoque_mei`, `p.estoque_simples`, `p.taxa_mei`, `p.taxa_sobrevivencia_5_anos`
+
+
