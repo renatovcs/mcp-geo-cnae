@@ -3,7 +3,8 @@ services:
     image: memgraph/memgraph:latest
     container_name: memgraph
     ports:
-      - "7687:7687"
+      # Vincula estritamente a 127.0.0.1 para acesso local/SSH tunnel seguro (OWASP A01/A05)
+      - "127.0.0.1:7687:7687"
     environment:
       - MEMGRAPH="--telemetry-enabled=false --memory-limit=0"
     volumes:
@@ -20,7 +21,8 @@ services:
     image: memgraph/lab:latest
     container_name: memgraph-lab
     ports:
-      - "3000:3000"
+      # Vincula estritamente a 127.0.0.1 para acesso local/SSH tunnel/Cloudflare (OWASP A01/A05)
+      - "127.0.0.1:3000:3000"
     environment:
       - QUICK_CONNECT_MG_HOST=memgraph
       - QUICK_CONNECT_MG_PORT=7687
@@ -35,7 +37,8 @@ services:
       dockerfile: Dockerfile
     container_name: mcp-geo-cnae-server
     ports:
-      - "8006:8000"
+      # Vincula estritamente a 127.0.0.1 para tráfego via Cloudflare Tunnel (OWASP A01/A05)
+      - "127.0.0.1:8006:8000"
     environment:
       - MEMGRAPH_URI=bolt://memgraph:7687
       - MEMGRAPH_USER=
