@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 from neo4j.exceptions import ServiceUnavailable
 
-from server import MemgraphClient, normalizar_cnae, normalizar_municipio
+from server import MemgraphClient, clamp_limite, normalizar_cnae, normalizar_municipio
 
 
 class TestUnitHelpers(unittest.TestCase):
@@ -20,6 +20,12 @@ class TestUnitHelpers(unittest.TestCase):
         self.assertEqual(normalizar_municipio("  Florianópolis  "), "FLORIANOPOLIS")
         self.assertEqual(normalizar_municipio("Embu-Guaçu"), "EMBU GUACU")
         self.assertEqual(normalizar_municipio(""), "")
+
+    def test_clamp_limite_restringe_intervalo(self) -> None:
+        self.assertEqual(clamp_limite(0), 1)
+        self.assertEqual(clamp_limite(-10), 1)
+        self.assertEqual(clamp_limite(25), 25)
+        self.assertEqual(clamp_limite(99999), 100)
 
     def test_memgraph_client_reseta_driver_em_service_unavailable(self) -> None:
         client = MemgraphClient(uri="bolt://localhost:7687")

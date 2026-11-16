@@ -52,6 +52,11 @@ def normalizar_municipio(texto: str) -> str:
     return n.strip().upper().replace("-", " ")
 
 
+def clamp_limite(valor: int, minimo: int = 1, maximo: int = 100) -> int:
+    """Restringe limites de consulta para evitar exaustão de recursos (OWASP A04)."""
+    return max(minimo, min(int(valor), maximo))
+
+
 class MemgraphClient:
     """Gerenciador da conexão e execução de consultas no Memgraph."""
 
@@ -130,6 +135,7 @@ def buscar_coocorrencia_cnaes_global(
         Lista de dicionários contendo os CNAEs coocorrentes ordenados por frequência decrescente.
     """
     fmt, raw = normalizar_cnae(codigo_cnae)
+    limite = clamp_limite(limite)
     query = """
     MATCH (c1:CNAE)
     WHERE c1.codigo = $fmt OR c1.codigo_raw = $raw
@@ -178,6 +184,7 @@ def buscar_coocorrencia_cnaes_municipio(
         Lista de dicionários contendo os CNAEs coocorrentes no município, ordenados por frequência.
     """
     fmt, raw = normalizar_cnae(codigo_cnae)
+    limite = clamp_limite(limite)
     ibge_str = codigo_ibge.strip()
     norm_mun = normalizar_municipio(ibge_str)
 
@@ -356,6 +363,7 @@ def buscar_perfil_economico_municipio(
     """
     ibge_str = codigo_ibge.strip()
     norm_mun = normalizar_municipio(ibge_str)
+    top_cnaes = clamp_limite(top_cnaes)
     query = """
     MATCH (m:Municipio)
     WHERE m.codigo_ibge = $ibge OR toLower(m.nome) = toLower($ibge) OR m.nome_normalizado = $norm
@@ -471,6 +479,7 @@ def buscar_perfil_economico_regiao_ibge(
     """
     regiao_str = nome_regiao.strip()
     norm_reg = normalizar_municipio(regiao_str)
+    top_cnaes = clamp_limite(top_cnaes)
     query = """
     MATCH (ri)
     WHERE (ri:RegiaoImediata OR ri:RegiaoIntermediaria) 
@@ -690,6 +699,7 @@ def buscar_expansao_filiais_cnae(
         Lista com as atividades de filiais mais geradas ordenadas por frequência.
     """
     fmt, raw = normalizar_cnae(codigo_cnae)
+    limite = clamp_limite(limite)
     query = """
     MATCH (c1:CNAE)
     WHERE c1.codigo = $fmt OR c1.codigo_raw = $raw
@@ -797,7 +807,7 @@ async def health_check(request: Request) -> Response:
                 "status": "unhealthy",
                 "service": "mcp-geo-cnae",
                 "memgraph": "disconnected",
-                "detail": str(exc),
+                "detail": "Service unavailable",
             },
             status_code=503,
         )

@@ -15,6 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copia código-fonte e tabelas geográficas oficiais
 COPY . .
 
+# Cria usuário não-privilegiado para execução segura (OWASP A05)
+RUN useradd --create-home --shell /bin/bash appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
 # Variáveis padrão de ambiente
 ENV PYTHONUNBUFFERED=1 \
     MEMGRAPH_URI=bolt://memgraph:7687 \

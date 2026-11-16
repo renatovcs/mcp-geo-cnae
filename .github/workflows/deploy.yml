@@ -69,7 +69,7 @@ jobs:
 
       - name: Sincronizar Arquivos via Rsync
         run: |
-          rsync -avz -e "ssh -o StrictHostKeyChecking=no" \
+          rsync -avz -e "ssh -o StrictHostKeyChecking=yes" \
             --exclude '.git' \
             --exclude '__pycache__' \
             --exclude '*.pyc' \
@@ -79,7 +79,7 @@ jobs:
 
       - name: Executar Deploy e Otimizacao Docker
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ steps.target.outputs.user }}@${{ steps.target.outputs.host }} "bash -s" << 'EOF'
+          ssh -o StrictHostKeyChecking=yes ${{ steps.target.outputs.user }}@${{ steps.target.outputs.host }} "bash -s" << 'EOF'
             set -euo pipefail
             cd /home/ubuntu/mcp-geo-cnae
 
