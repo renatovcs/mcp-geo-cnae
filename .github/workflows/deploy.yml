@@ -33,6 +33,10 @@ jobs:
         run: |
           python -m py_compile server.py ingestao.py ingestao_receita.py ingestao_coocorrencias.py ingestao_filiais.py ingestao_simples.py
 
+      - name: Run Unit Tests
+        run: |
+          python -m unittest tests/test_unit_helpers.py
+
   deploy:
     name: Deploy & Optimize Docker on Oracle VM
     needs: validate
@@ -52,7 +56,8 @@ jobs:
           mkdir -p ~/.ssh
           HOST="${{ secrets.SSH_HOST }}"
           if [ -z "$HOST" ]; then
-            HOST="141.148.38.30"
+            echo "Erro: secret SSH_HOST nao configurado." >&2
+            exit 1
           fi
           USER="${{ secrets.SSH_USERNAME }}"
           if [ -z "$USER" ]; then

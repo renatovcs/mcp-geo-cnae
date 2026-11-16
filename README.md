@@ -1,5 +1,12 @@
 # MCP Geo-CNAE: Arquitetura GraphRAG Unificada
 
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![MCP](https://img.shields.io/badge/Protocol-MCP-6E40C9)
+![Memgraph](https://img.shields.io/badge/Graph%20DB-Memgraph-FF5722)
+![DuckDB](https://img.shields.io/badge/ETL%20Streaming-DuckDB-FFF000?logo=duckdb&logoColor=black)
+![Docker](https://img.shields.io/badge/Deploy-Docker%20%26%20OCI-2496ED?logo=docker&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
+
 Servidor MCP (**Model Context Protocol**) em Python integrado ao banco de dados em grafos **Memgraph**, projetado para análises de inteligência de mercado cruzando relações de coocorrência de **CNAEs de empresas ativas na Receita Federal** com a **topologia geográfica de municípios, estados e macrorregiões brasileiras**, além de dinâmicas de sobrevivência empresarial e expansão corporativa matriz-filiais.
 
 > 💡 **Novo**: Veja o [Guia Prático de Perguntas e Casos de Uso](PERGUNTAS_E_CASOS_DE_USO.md) com dezenas de exemplos de perguntas estratégicas de inteligência de mercado prontas para fazer ao assistente.
@@ -7,6 +14,18 @@ Servidor MCP (**Model Context Protocol**) em Python integrado ao banco de dados 
 ---
 
 ## 🏗️ Arquitetura do Grafo (GraphRAG)
+
+```mermaid
+flowchart LR
+    C1["(:CNAE)"] <-->|"[:COOCORRE_GERAL]<br/>[:COOCORRE_EM]"| C2["(:CNAE)"]
+    C1 -->|"[:GERA_FILIAL]"| C2
+    C1 -->|"[:PRESENTE_EM]<br/>estoque, MEI, Simples, sobrevivência 5a"| M["(:Municipio)"]
+    M <-->|"[:FAZ_DIVISA_COM]<br/>distancia_km"| M2["(:Municipio)"]
+    M -->|"[:PERTENCE_A]"| RI["(:RegiaoImediata)"]
+    RI -->|"[:PERTENCE_A]"| RINT["(:RegiaoIntermediaria)"]
+    RINT -->|"[:PERTENCE_A]"| E["(:Estado)"]
+    E -->|"[:PERTENCE_A]"| R["(:Regiao)"]
+```
 
 O grafo conecta atividades econômicas, dinâmicas temporais de mercado e topologia física:
 
@@ -83,12 +102,12 @@ Isso elimina qualquer ambiguidade de homônimos ou divergências de acentuação
 
 ## 🚀 Como Executar no Servidor OCI (Produção)
 
-No servidor de produção na Oracle Cloud Infrastructure (`ubuntu@141.148.38.30`):
+No servidor de produção na Oracle Cloud Infrastructure (`ubuntu@<SEU_IP_OCI>`):
 
 ### 1. Conectar via SSH e acessar o projeto
 
 ```bash
-ssh ubuntu@141.148.38.30
+ssh ubuntu@<SEU_IP_OCI>
 cd ~/mcp-geo-cnae
 ```
 
@@ -99,7 +118,7 @@ docker compose up -d memgraph memgraph-lab
 ```
 
 * **Memgraph Bolt**: `bolt://localhost:7687`
-* **Memgraph Lab (Interface Visual Web)**: [http://141.148.38.30:3000](http://141.148.38.30:3000)
+* **Memgraph Lab (Interface Visual Web)**: `http://<SEU_IP_OCI>:3000` (ou via túnel SSH)
 
 ### 3. Executar o Container de Ingestão Nacional (Brasil Inteiro)
 
@@ -162,7 +181,7 @@ No seu cliente compatível com MCP (Antigravity, Cursor, etc.), configure a URL 
 {
   "mcpServers": {
     "geo-cnae-remote": {
-      "url": "http://141.148.38.30:8006/mcp"
+      "url": "http://<SEU_IP_OCI>:8006/mcp"
     }
   }
 }
@@ -173,8 +192,8 @@ No seu cliente compatível com MCP (Antigravity, Cursor, etc.), configure a URL 
 {
   "mcpServers": {
     "geo-cnae": {
-      "command": "/home/renatovcs/mcp-geo-cnae/.venv/bin/python",
-      "args": ["/home/renatovcs/mcp-geo-cnae/server.py"],
+      "command": "/caminho/para/mcp-geo-cnae/.venv/bin/python",
+      "args": ["/caminho/para/mcp-geo-cnae/server.py"],
       "env": {
         "MEMGRAPH_URI": "bolt://localhost:7687",
         "MEMGRAPH_USER": "",
@@ -192,7 +211,7 @@ No seu cliente compatível com MCP (Antigravity, Cursor, etc.), configure a URL 
     "geo-cnae-oci": {
       "command": "ssh",
       "args": [
-        "ubuntu@141.148.38.30",
+        "ubuntu@<SEU_IP_OCI>",
         "docker exec -i mcp-geo-cnae-server python server.py"
       ]
     }
@@ -204,7 +223,7 @@ No seu cliente compatível com MCP (Antigravity, Cursor, etc.), configure a URL 
 
 ## 🔍 Guia Completo do Memgraph Lab (Interface Web)
 
-Acesse `http://141.148.38.30:3000` (ou `http://localhost:3000` se estiver rodando localmente).
+Acesse `http://<SEU_IP_OCI>:3000` (ou `http://localhost:3000` se estiver rodando localmente).
 
 ### ⚠️ Regras Cruciais para Consultas Cypher
 
