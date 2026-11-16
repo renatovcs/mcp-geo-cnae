@@ -86,6 +86,10 @@ class MemgraphClient:
         session = driver.session()
         try:
             yield session
+        except ServiceUnavailable:
+            # Descarta o driver em caso de queda/reinício do Memgraph para reconectar na próxima chamada
+            self.close()
+            raise
         finally:
             session.close()
 
